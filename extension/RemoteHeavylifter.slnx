@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="backend/RemoteHeavylifter/RemoteHeavylifter.csproj" />
+  <Project Path="backend/RemoteHeavylifter.Tests/RemoteHeavylifter.Tests.csproj" />
+</Solution>

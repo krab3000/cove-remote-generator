@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>RemoteHeavylifter</RootNamespace>
+    <AssemblyName>RemoteHeavylifter</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <InternalsVisibleTo Include="RemoteHeavylifter.Tests" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(UseLocalCoveSdk)' == 'true'">
+    <ProjectReference Include="$(CoveSdkProject)" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(UseLocalCoveSdk)' != 'true'">
+    <PackageReference Include="Cove.Sdk" Version="$(CoveSdkVersion)" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="extension.json" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <None Include="..\..\frontend\dist\ui.mjs" Link="assets\ui.mjs" Condition="Exists('..\..\frontend\dist\ui.mjs')"
+          CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <!-- A NuGet PackageReference imports these packaging rules automatically (buildTransitive); a
+       ProjectReference does not, so import them explicitly. They keep the host's own assemblies
+       (Cove.*, EF Core, Npgsql, ...) out of the extension package. -->
+  <Import Project="$(CoveRepoRoot)src\Cove.Sdk\buildTransitive\Cove.Sdk.targets" Condition="'$(UseLocalCoveSdk)' == 'true'" />
+
+</Project>

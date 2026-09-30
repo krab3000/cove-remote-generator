@@ -1,0 +1,12 @@
+{
+  "api_version": 1,
+  "server_version": "0.1.0",
+  "ffmpeg_version": "ffmpeg version n7.1 Copyright (c) 2000-2024 the FFmpeg developers",
+  "encoder": "libx264",
+  "capacity": 4,
+  "running": 1,
+  "queued": 3,
+  "max_queue": 2000,
+  "disk_free_bytes": 107374182400,
+  "media_roots": ["/mnt/media"]
+}

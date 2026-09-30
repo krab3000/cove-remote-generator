@@ -1,0 +1,19 @@
+{
+  "client_task_id": "cove-1a2b3c-123-a1",
+  "video_id": 123,
+  "source_path": "/mnt/media/Movies/Example.mp4",
+  "duration": 1834.2,
+  "cover": { "seek_seconds": 366.84, "filter": null, "fallback_without_filter": true },
+  "preview": {
+    "segments": 12,
+    "segment_duration": 0.75,
+    "exclude_start": "0",
+    "exclude_end": "0",
+    "preset": "slow",
+    "audio": false,
+    "crf": 21,
+    "width": 640,
+    "scale_filter": "scale=640:-2"
+  },
+  "sprite": { "max_frames": 81, "frame_width": 160, "pre_filter": null, "sprite_filename": "123_sprite.jpg" }
+}

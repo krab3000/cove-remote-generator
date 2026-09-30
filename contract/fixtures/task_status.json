@@ -1,0 +1,18 @@
+{
+  "task_id": "4f9c2d0e8b7a4e1f9a3b5c6d7e8f9012",
+  "client_task_id": "cove-1a2b3c-123-a1",
+  "video_id": 123,
+  "status": "partial",
+  "progress": 1.0,
+  "error": null,
+  "error_code": null,
+  "artifacts": {
+    "cover": { "status": "succeeded", "size": 48213, "sha256": "9f2b5c1e0d3a4b6c8e7f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d", "error": null },
+    "preview": { "status": "failed", "size": null, "sha256": null, "error": "preview: Invalid data found when processing input" },
+    "sprite": { "status": "succeeded", "size": 201773, "sha256": "0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9", "error": null },
+    "vtt": { "status": "succeeded", "size": 5832, "sha256": "1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a", "error": null }
+  },
+  "created_at": "2026-09-30T10:00:00Z",
+  "started_at": "2026-09-30T10:00:01Z",
+  "finished_at": "2026-09-30T10:00:42Z"
+}

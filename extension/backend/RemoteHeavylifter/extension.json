@@ -1,0 +1,12 @@
+{
+  "id": "com.cove.remote-heavylifter",
+  "name": "Remote Heavylifter",
+  "version": "0.1.0",
+  "kind": "extension",
+  "description": "Generates video covers, previews and sprite sheets on remote generation servers and places them in Cove's generated folder.",
+  "author": "krab3000",
+  "minCoveVersion": "1.5.0",
+  "entryDll": "RemoteHeavylifter.dll",
+  "jsBundle": "assets/ui.mjs",
+  "categories": ["tools", "library"]
+}

@@ -1,0 +1,37 @@
+# Example deployment of a generation server. Copy next to a .env holding HL_API_KEYS.
+#
+#   docker compose -f docker-compose.example.yml up -d --build
+#
+# The media library must be mounted READ-ONLY at a path listed in HL_MEDIA_ROOTS. In Cove's
+# Settings → Remote Generation, map Cove's library path (e.g. D:/media or /media) to that path.
+services:
+  heavylifter:
+    build: .
+    image: remote-heavylifter:latest
+    restart: unless-stopped
+    ports:
+      - "8750:8750"
+    environment:
+      HL_API_KEYS: ${HL_API_KEYS:?set HL_API_KEYS to one or more comma-separated secrets}
+      HL_MEDIA_ROOTS: /mnt/media
+      HL_MAX_CONCURRENCY: ${HL_MAX_CONCURRENCY:-4}
+      HL_ARTIFACT_TTL_HOURS: "6"
+      # libx264 (default), h264_nvenc, h264_qsv, h264_vaapi. Hardware encodes fall back to libx264 on failure.
+      HL_H264_ENCODER: ${HL_H264_ENCODER:-libx264}
+    volumes:
+      - /path/to/your/media:/mnt/media:ro
+      - heavylifter-work:/var/lib/heavylifter
+    # NVIDIA: uncomment and set HL_H264_ENCODER=h264_nvenc
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu, video, compute, utility]
+    # Intel/AMD VAAPI: uncomment and set HL_H264_ENCODER=h264_vaapi
+    # devices:
+    #   - /dev/dri:/dev/dri
+
+volumes:
+  heavylifter-work:

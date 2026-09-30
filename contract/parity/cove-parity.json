@@ -1,0 +1,84 @@
+{
+  "source": "yourcove/cove src/Cove.Api/Services/ThumbnailService.cs, VideoFrameBatchExtractor.cs, SpriteFrameSet.cs @ f4cd955e96a4286e4dc4fcb6d71197553d74fb92",
+  "fixed": [
+    { "value": 366.84, "digits": 2, "expected": "366.84" },
+    { "value": 0.125, "digits": 2, "expected": "0.13" },
+    { "value": 2.675, "digits": 2, "expected": "2.67" },
+    { "value": 1.0, "digits": 3, "expected": "1.000" },
+    { "value": 0.0005, "digits": 3, "expected": "0.001" }
+  ],
+  "previewPlans": [
+    {
+      "name": "30s default",
+      "duration": 30, "segments": 12, "segmentDuration": 0.75, "excludeStart": "0", "excludeEnd": "0", "audio": false,
+      "mode": "spliced", "usableStart": 0, "usableDuration": 30,
+      "seeks": [1.25, 3.75, 6.25, 8.75, 11.25, 13.75, 16.25, 18.75, 21.25, 23.75, 26.25, 28.75]
+    },
+    {
+      "name": "short video uses one encode",
+      "duration": 5, "segments": 12, "segmentDuration": 0.75, "excludeStart": "0", "excludeEnd": "0", "audio": false,
+      "mode": "single", "usableStart": 0, "usableDuration": 5, "seeks": []
+    },
+    {
+      "name": "percent and seconds exclusions",
+      "duration": 100, "segments": 12, "segmentDuration": 0.75, "excludeStart": "10%", "excludeEnd": "5", "audio": false,
+      "mode": "spliced", "usableStart": 10, "usableDuration": 85,
+      "seeks": [13.541667, 20.625, 27.708333, 34.791667, 41.875, 48.958333, 56.041667, 63.125, 70.208333, 77.291667, 84.375, 91.458333]
+    },
+    {
+      "name": "audio uses chunks and clamps the last segment",
+      "duration": 10, "segments": 12, "segmentDuration": 0.75, "excludeStart": "0", "excludeEnd": "0", "audio": true,
+      "mode": "chunks", "usableStart": 0, "usableDuration": 10,
+      "seeks": [0.416667, 1.25, 2.083333, 2.916667, 3.75, 4.583333, 5.416667, 6.25, 7.083333, 7.916667, 8.75, 9.25]
+    },
+    {
+      "name": "everything excluded",
+      "duration": 10, "segments": 12, "segmentDuration": 0.75, "excludeStart": "0", "excludeEnd": "100%", "audio": false,
+      "mode": null
+    },
+    {
+      "name": "zero and out-of-range settings fall back and clamp",
+      "duration": 60, "segments": 0, "segmentDuration": 0, "excludeStart": "junk", "excludeEnd": "-3", "audio": false,
+      "mode": "spliced", "usableStart": 0, "usableDuration": 60,
+      "seeks": [2.5, 7.5, 12.5, 17.5, 22.5, 27.5, 32.5, 37.5, 42.5, 47.5, 52.5, 57.5]
+    }
+  ],
+  "spritePlans": [
+    { "duration": 30, "frameCount": 15, "cols": 4, "rows": 4, "interval": 2, "firstTimestamps": [1, 3, 5], "lastTimestamp": 29 },
+    { "duration": 1, "frameCount": 1, "cols": 1, "rows": 1, "interval": 1, "firstTimestamps": [0.5], "lastTimestamp": 0.5 },
+    { "duration": 7, "frameCount": 3, "cols": 2, "rows": 2, "interval": 2.333333, "firstTimestamps": [1.166667], "lastTimestamp": 5.833333 },
+    { "duration": 3600, "frameCount": 81, "cols": 9, "rows": 9, "interval": 44.444444, "firstTimestamps": [22.222222], "lastTimestamp": 3577.777778 }
+  ],
+  "vtt": {
+    "spriteFilename": "42_sprite.jpg", "duration": 7, "frameCount": 3, "cols": 2, "interval": 2.3333333333333335,
+    "frameWidth": 160, "frameHeight": 90,
+    "expected": "WEBVTT\n\n00:00:00.000 --> 00:00:02.333\n42_sprite.jpg#xywh=0,0,160,90\n\n00:00:02.333 --> 00:00:04.666\n42_sprite.jpg#xywh=160,0,160,90\n\n00:00:04.666 --> 00:00:07.000\n42_sprite.jpg#xywh=0,90,160,90\n\n"
+  },
+  "vttTimes": [
+    { "seconds": 0, "expected": "00:00:00.000" },
+    { "seconds": 3723.5, "expected": "01:02:03.500" },
+    { "seconds": 4.666666666666667, "expected": "00:00:04.666" }
+  ],
+  "coverArgs": {
+    "source": "/media/a.mp4", "seek": 366.84, "filter": null, "output": "/out/cover.jpg",
+    "expected": ["-v", "error", "-fflags", "+discardcorrupt", "-err_detect", "ignore_err", "-y", "-ss", "366.84", "-i", "/media/a.mp4", "-vframes", "1", "-q:v", "2", "-f", "image2", "/out/cover.jpg"]
+  },
+  "splicedFilter": {
+    "segments": 2, "scale": "scale=640:-2",
+    "expected": "[0:v:0]scale=640:-2,setsar=1,setpts=PTS-STARTPTS[v0];[1:v:0]scale=640:-2,setsar=1,setpts=PTS-STARTPTS[v1];[v0][v1]concat=n=2:v=1:a=0[spliced];[spliced]null"
+  },
+  "gapFill": [
+    { "present": [true, true, true, true, true, true, true, true, true, true], "expected": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9] },
+    { "present": [false, true, true, true, true, true, true, true, true, true], "expected": [1, 1, 2, 3, 4, 5, 6, 7, 8, 9] },
+    { "present": [true, true, true, true, true, false, true, true, true, true], "expected": [0, 1, 2, 3, 4, 4, 6, 7, 8, 9] },
+    { "present": [true, false, true], "expected": null },
+    { "present": [false, false], "expected": null }
+  ],
+  "generatedPaths": [
+    { "videoId": 1, "bucket": "67" },
+    { "videoId": 2, "bucket": "26" },
+    { "videoId": 42, "bucket": "e8" },
+    { "videoId": 123, "bucket": "a5" },
+    { "videoId": 100000, "bucket": "1f" }
+  ]
+}

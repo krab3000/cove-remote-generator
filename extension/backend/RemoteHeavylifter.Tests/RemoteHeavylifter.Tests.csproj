@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <!-- Tests run outside Cove, so they need the host assemblies the extension package leaves out. -->
+    <CoveHostProvidedAssemblies>;none;</CoveHostProvidedAssemblies>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.10.1" />
+    <PackageReference Include="xunit.v3" Version="3.2.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+    <ProjectReference Include="..\RemoteHeavylifter\RemoteHeavylifter.csproj" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(UseLocalCoveSdk)' == 'true'">
+    <ProjectReference Include="$(CoveSdkProject)" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(UseLocalCoveSdk)' != 'true'">
+    <PackageReference Include="Cove.Sdk" Version="$(CoveSdkVersion)" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="..\..\..\contract\**\*.json" LinkBase="contract" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

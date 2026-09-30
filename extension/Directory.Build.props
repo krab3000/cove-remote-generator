@@ -1,0 +1,21 @@
+<Project>
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <IsPackable>false</IsPackable>
+
+    <!-- The Cove checkout next to this repo (d:\dev\cove\cove). Override with -p:CoveRepoRoot=... -->
+    <CoveRepoRoot Condition="'$(CoveRepoRoot)' == ''">$([MSBuild]::NormalizeDirectory('$(MSBuildThisFileDirectory)', '..', '..', 'cove'))</CoveRepoRoot>
+    <CoveSdkProject>$(CoveRepoRoot)src\Cove.Sdk\Cove.Sdk.csproj</CoveSdkProject>
+    <!--
+      Build against the OLDEST supported published Cove.Sdk. The host resolves Cove.* to its own copies and
+      will not bind a reference to a newer assembly version than it has, so an extension compiled against
+      a newer SDK (e.g. a local 1.5.2-dev checkout) does not load on a released 1.5.x Cove at all.
+      Keep this in step with minCoveVersion in extension.json. -p:UseLocalCoveSdk=true builds against the
+      sibling checkout instead (only for Cove built from that same source).
+    -->
+    <CoveSdkVersion Condition="'$(CoveSdkVersion)' == ''">1.5.0</CoveSdkVersion>
+  </PropertyGroup>
+</Project>

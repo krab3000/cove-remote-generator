@@ -1,0 +1,8 @@
+# Optional override: build Cove from the sibling checkout instead of pulling the published image.
+#   setup.ps1 -CoveFromSource        /  setup.sh --cove-from-source
+services:
+  cove:
+    image: cove:local-source
+    build:
+      context: ${COVE_SOURCE:-../../cove}
+      dockerfile: docker/Dockerfile
