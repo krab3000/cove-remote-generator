@@ -9,6 +9,7 @@ using Microsoft.Extensions.Logging;
 using RemoteHeavylifter.Protocol;
 using RemoteHeavylifter.Worker.Hosting;
 using RemoteHeavylifter.Worker.Media;
+using RemoteHeavylifter.Worker.Media.Libav;
 using RemoteHeavylifter.Worker.Tasks;
 using RemoteHeavylifter.Worker.Transport;
 
@@ -30,6 +31,52 @@ internal static class Specs
 
     /// <summary>A plain local source: no per-input options, so the original Python expectations hold verbatim.</summary>
     public static MediaSource Local(string path, long size = 0) => new(path, [], size);
+}
+
+/// <summary>The media engines the generator tests run against.</summary>
+internal static class Engines
+{
+    public static IMediaEngine Cli { get; } = new CliMediaEngine(MediaContext.Default);
+}
+
+/// <summary>The libav engine over the shared libraries in HL_FFMPEG_LIBS or artifacts/ffmpeg/&lt;rid&gt;/ffmpeg
+/// (scripts/fetch-ffmpeg.sh); tests using it skip when there are none.</summary>
+internal static class LibavEngines
+{
+    private static readonly Lazy<(LibavMediaEngine? Engine, string Reason)> Loaded = new(() =>
+    {
+        var dir = Environment.GetEnvironmentVariable("HL_FFMPEG_LIBS") ?? FindBundled();
+        return LibavLoader.TryLoad(dir, out var info, out var reason)
+            ? (new LibavMediaEngine(info!, new LibavEngineOptions(null, 1, "libx264", []), Engines.Cli), "")
+            : (null, reason);
+    });
+
+    public static LibavMediaEngine Require()
+    {
+        Assert.SkipUnless(Loaded.Value.Engine is not null, $"libav not available: {Loaded.Value.Reason}");
+        return Loaded.Value.Engine!;
+    }
+
+    /// <summary>A libav engine that encodes previews with <paramref name="encoder"/>.</summary>
+    public static LibavMediaEngine WithEncoder(string encoder)
+    {
+        Require();
+        LibavLoader.TryLoad(null, out var info, out _);
+        return new LibavMediaEngine(info!, new LibavEngineOptions(null, 1, encoder, []), Engines.Cli);
+    }
+
+    private static string? FindBundled()
+    {
+        var rid = (OperatingSystem.IsWindows() ? "win" : OperatingSystem.IsMacOS() ? "osx" : "linux") + "-"
+                  + System.Runtime.InteropServices.RuntimeInformation.OSArchitecture.ToString().ToLowerInvariant();
+        for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir is not null; dir = dir.Parent)
+        {
+            var candidate = Path.Combine(dir.FullName, "artifacts", "ffmpeg", rid, "ffmpeg");
+            if (Directory.Exists(candidate))
+                return candidate;
+        }
+        return null;
+    }
 }
 
 internal static class Parity
@@ -76,6 +123,24 @@ internal static class Ffmpeg
         Run("ffmpeg", [.. args]);
         return path;
     }
+
+    /// <summary>Frame n is a flat grey of level 16 + (3·n mod 216): a frame's number can be read back from its pixels.
+    /// H.264 with B-frames and a 2 s GOP, so seeks land mid-GOP.</summary>
+    public static string MakeLevelsClip(string path, double seconds)
+    {
+        var duration = seconds.ToString(CultureInfo.InvariantCulture);
+        Run("ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", $"color=c=black:s=160x90:r=25:d={duration},format=gray,geq=lum='16+mod(3*N\\,216)'",
+            "-c:v", "libx264", "-preset", "ultrafast", "-bf", "3", "-g", "50", "-pix_fmt", "yuv420p", path);
+        return path;
+    }
+
+    /// <summary>Each stream's type and duration (seconds), in file order.</summary>
+    public static List<(string Type, double Duration)> Streams(string path) =>
+        Run("ffprobe", "-v", "error", "-show_entries", "stream=codec_type,duration", "-of", "csv=p=0", path)
+            .Split((char[])['\n', '\r'], StringSplitOptions.RemoveEmptyEntries)
+            .Select(line => line.Split(','))
+            .Select(parts => (parts[0], double.Parse(parts[1], CultureInfo.InvariantCulture)))
+            .ToList();
 
     public static (int Width, int Height, double Duration) ProbeStream(string path)
     {

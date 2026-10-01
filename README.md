@@ -62,7 +62,20 @@ It has three parts:
 
 ## Running a worker
 
-With Docker (recommended; the image bundles the same BtbN ffmpeg builds Cove uses). From the repository root:
+### Media engines
+
+The worker reads and encodes video in one of two ways:
+
+- **libav (default).** FFmpeg's libraries run inside the worker process, through the [FFmpeg.AutoGen](https://github.com/Ruslan-B/FFmpeg.AutoGen) 9.0 bindings. Each step opens its video once and keeps one decoder (on the GPU with `HL_HWACCEL`). Between sprite and phash timestamps it decodes on instead of seeking whenever a seek would decode the same GOP again, and frames reach the image code in memory. Seeks, filters, autorotation and encoder settings mirror the command line's.
+  - The bindings need exactly FFmpeg 9.0's libraries (avcodec 63, avformat 63, avfilter 12, avutil 61, swscale 10, swresample 7). The Docker image and the standalone packages bundle BtbN's `n9.0` GPL shared build, which includes NVENC, NVDEC/CUDA, QSV and AMF.
+  - Outputs match the command line's closely, not bit for bit: a previewed segment can differ by a frame, and sprite frames skip a JPEG round trip.
+- **Command line (`HL_MEDIA_ENGINE=cli`).** One ffmpeg/ffprobe process per operation, as in earlier versions. The worker falls back to it when the libav libraries are missing or don't match.
+
+A native crash inside libav takes the whole worker down, where a crashing ffmpeg process only failed its task. Run the worker under a restart policy (Docker `--restart unless-stopped`, a service manager), or use `HL_MEDIA_ENGINE=cli` if a library misbehaves on some video.
+
+### Docker
+
+With Docker (recommended; the image bundles BtbN's FFmpeg n9.0 shared build). From the repository root:
 
 ```sh
 docker build -f worker/Dockerfile -t remote-heavylifter-worker .
@@ -80,7 +93,7 @@ Keep the data volume: it holds the worker's token, which is its identity.
 
 ### Without Docker
 
-You need ffmpeg and ffprobe, either on `PATH` or given with `HL_FFMPEG` / `HL_FFPROBE`:
+The standalone packages below bundle FFmpeg (libraries and executables) in an `ffmpeg` folder next to the worker; on Windows and Linux nothing else is needed. Run from source, or on macOS (BtbN has no macOS build), the worker uses FFmpeg 9.0 shared libraries from `HL_FFMPEG_LIBS` when they match, and otherwise ffmpeg and ffprobe from `PATH` or `HL_FFMPEG` / `HL_FFPROBE`:
 
 | OS | Install ffmpeg |
 |---|---|
@@ -88,7 +101,7 @@ You need ffmpeg and ffprobe, either on `PATH` or given with `HL_FFMPEG` / `HL_FF
 | Debian/Ubuntu | `sudo apt install ffmpeg` |
 | Windows | `winget install Gyan.FFmpeg` |
 
-Hardware encoding (`HL_H264_ENCODER=h264_nvenc` and so on) needs an ffmpeg build that includes it.
+Hardware encoding (`HL_H264_ENCODER=h264_nvenc` and so on) needs an ffmpeg build that includes it. For the libav engine from source, put the shared libraries where the worker looks: `scripts/fetch-ffmpeg.sh win-x64 artifacts/ffmpeg/win-x64` and `HL_FFMPEG_LIBS=artifacts/ffmpeg/win-x64/ffmpeg` (the tests find that folder by themselves).
 
 **From source** (needs the .NET 10 SDK):
 
@@ -110,8 +123,8 @@ dotnet run --project worker/RemoteHeavylifter.Worker -c Release
    ```sh
    scripts/package-worker.sh osx-arm64          # or linux-x64, linux-arm64, win-x64; no argument builds all four
    ```
-   The binaries go to `artifacts/worker/<rid>/`, and a zip is written to `artifacts/remote-heavylifter-worker-<version>-<rid>.zip`.
-2. Copy the binary to the worker machine and run it there:
+   The binaries go to `artifacts/worker/<rid>/` with FFmpeg in `artifacts/worker/<rid>/ffmpeg/` (`scripts/fetch-ffmpeg.sh` downloads it once into `artifacts/cache/`), and a zip is written to `artifacts/remote-heavylifter-worker-<version>-<rid>.zip`. The FFmpeg libraries make a package about 120 MB; they are GPL builds, which makes the package GPL too.
+2. Copy the binary and its `ffmpeg` folder (or the zip) to the worker machine and run it there:
    ```sh
    HL_COVE_URL=http://192.168.1.10:5073 HL_WORKER_NAME=gpu-box HL_DATA_DIR=~/.heavylifter \
      ./RemoteHeavylifter.Worker
@@ -142,10 +155,13 @@ Stop the worker with Ctrl+C. Tasks it was running are re-queued by Cove on anoth
 | `HL_MAX_CONCURRENCY` | `cpu/4` | Videos generated at once, shared by every Cove connected to the worker. Cove also caps this per worker. |
 | `HL_SOURCE_CACHE_MB` | `1024` | RAM for caching video bytes read from Cove, shared by all running videos. ffmpeg reads each video through a loopback endpoint in the worker, so its many seeks reuse one download of the header and of each byte range. `0` makes ffmpeg read from Cove directly. After each step the log shows the cache's hit rate and how much was read from Cove. |
 | `HL_H264_ENCODER` | `libx264` | Or `h264_nvenc`, `h264_qsv`, `h264_vaapi`, and so on. If a hardware encode fails, the worker falls back to libx264. |
-| `HL_HWACCEL` | – | Decode videos on the GPU with this ffmpeg hwaccel, for example `cuda` (NVIDIA), `d3d11va`, `qsv` or `vaapi`. It applies to every input of the cover, preview, sprite and phash commands. Frame-extraction batches shrink to 6 inputs to save video memory. A batch or step that fails with hardware decoding is retried in software. If ffmpeg doesn't list the hwaccel in `ffmpeg -hwaccels`, the worker decodes in software and logs a warning. Hardware-decoded phashes have not been checked against Cove's. |
+| `HL_HWACCEL` | – | Decode videos on the GPU with this ffmpeg hwaccel, for example `cuda` (NVIDIA), `d3d11va`, `qsv` or `vaapi`. With libav, each step keeps one GPU decoder and copies only the frames it uses to memory. With the command line, every input of the cover, preview, sprite and phash commands gets `-hwaccel`, and frame batches shrink to 6 inputs to save video memory. Decoding that fails on the GPU continues in software. If FFmpeg lacks the hwaccel, the worker decodes in software and logs a warning. On a fast CPU, software decoding of 1080p H.264 can beat the GPU; the GPU pays off for 4K and HEVC, and frees the CPU. Hardware-decoded phashes have not been checked against Cove's. |
 | `HL_HWACCEL_DEVICES` | – | Comma-separated hwaccel devices (GPU indexes for `cuda`, for example `0,1`). Tasks take them in turn. |
-| `HL_FFMPEG_INPUT_ARGS` | – | Extra ffmpeg arguments placed before the cover and preview inputs; they apply only to the first input of a command. For hardware decoding use `HL_HWACCEL`. |
-| `HL_FFMPEG`, `HL_FFPROBE` | `ffmpeg`, `ffprobe` | Paths to the binaries. |
+| `HL_FFMPEG_INPUT_ARGS` | – | Extra ffmpeg input options. The command line places them before the cover and preview inputs (they apply only to a command's first input); libav applies them to every source it opens, as demuxer/protocol options. For hardware decoding use `HL_HWACCEL`. |
+| `HL_MEDIA_ENGINE` | `auto` | `auto`: libav in-process when its libraries load, else the command line. `libav`: refuse to start without them. `cli`: always the command line. |
+| `HL_FFMPEG_LIBS` | bundled | Directory with the FFmpeg 9.0 shared libraries. By default the bundled `ffmpeg` folder (`ffmpeg/lib` on Linux), then `/opt/ffmpeg/lib`. |
+| `HL_DECODE_THREADS` | auto | Decoder threads per video with libav. By default a video's share of the CPU (cores ÷ `HL_MAX_CONCURRENCY`, at most 16) for cover, sprite and phash frames, and libav's own choice for previews. |
+| `HL_FFMPEG`, `HL_FFPROBE` | bundled, else `ffmpeg`, `ffprobe` | Paths to the binaries the command line engine runs. |
 
 Networking notes:
 

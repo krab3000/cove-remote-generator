@@ -17,9 +17,9 @@ public class HttpSourceTests(ClipFixture clips) : IClassFixture<ClipFixture>
         await using var cove = await FakeCove.StartAsync(clips.Clip30);
         using var tmp = new TempDir();
         var source = MediaSource.ForCove(cove.Url, Token, new FileInfo(clips.Clip30).Length);
-        var ctx = MediaContext.Default;
+        var ctx = Engines.Cli;
 
-        Assert.Equal(30, await MediaProbe.DurationAsync(ctx, source, Ct), 0.1);
+        Assert.Equal(30, await ctx.ProbeDurationAsync(source, Ct), 0.1);
 
         var cover = tmp["cover.jpg"];
         await CoverGenerator.GenerateAsync(ctx, source, 30, Specs.Cover(), tmp.Path, cover, Ct);
@@ -45,9 +45,9 @@ public class HttpSourceTests(ClipFixture clips) : IClassFixture<ClipFixture>
         using var tmp = new TempDir();
         var source = MediaSource.ForCove(cove.Url, "wrong", 0);
 
-        Assert.Equal(0, await MediaProbe.DurationAsync(MediaContext.Default, source, Ct));
+        Assert.Equal(0, await Engines.Cli.ProbeDurationAsync(source, Ct));
         var ex = await Assert.ThrowsAsync<MediaException>(() =>
-            CoverGenerator.GenerateAsync(MediaContext.Default, source, 30, Specs.Cover(), tmp.Path, tmp["cover.jpg"], Ct));
+            CoverGenerator.GenerateAsync(Engines.Cli, source, 30, Specs.Cover(), tmp.Path, tmp["cover.jpg"], Ct));
         Assert.StartsWith("cover:", ex.Message);
         Assert.Equal(ErrorCodes.GenerationFailed, ex.Code);
         Assert.False(File.Exists(tmp["cover.jpg"]));
@@ -60,7 +60,7 @@ public class HttpSourceTests(ClipFixture clips) : IClassFixture<ClipFixture>
         Ffmpeg.RequireOrSkip();
         var size = new FileInfo(clips.Clip30).Length;
         using var tmp = new TempDir();
-        var ctx = MediaContext.Default;
+        var ctx = Engines.Cli;
 
         await using var direct = await FakeCove.StartAsync(clips.Clip30);
         var directSource = MediaSource.ForCove(direct.Url, Token, size);

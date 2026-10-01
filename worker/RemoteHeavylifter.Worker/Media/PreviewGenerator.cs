@@ -1,6 +1,4 @@
 using System.Globalization;
-using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Logging.Abstractions;
 using RemoteHeavylifter.Protocol;
 
 namespace RemoteHeavylifter.Worker.Media;
@@ -8,10 +6,6 @@ namespace RemoteHeavylifter.Worker.Media;
 public static class PreviewGenerator
 {
     internal static readonly string[] ProfileArgs = ["-profile:v", "high", "-level", "4.2"];
-
-    private static readonly TimeSpan EncodeTimeout = TimeSpan.FromSeconds(300);
-    private static readonly TimeSpan ChunkTimeout = TimeSpan.FromSeconds(60);
-    private static readonly TimeSpan ConcatTimeout = TimeSpan.FromSeconds(30);
 
     internal static string ScaleFilter(PreviewSpec spec) =>
         string.IsNullOrEmpty(spec.ScaleFilter) ? string.Create(CultureInfo.InvariantCulture, $"scale={spec.Width}:-2") : spec.ScaleFilter;
@@ -77,29 +71,9 @@ public static class PreviewGenerator
     internal static List<string> ConcatArgs(string listPath, string output) =>
         ["-v", "error", "-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c:v", "copy", output];
 
-    /// <summary>Hardware encode first when configured; any failure falls back to libx264 with a fresh command line.</summary>
-    private static async Task EncodeAsync(
-        MediaContext ctx, Func<string, List<string>> build, string output, TimeSpan timeout, ILogger log, CancellationToken ct)
-    {
-        if (ctx.Encoder != EncoderArgs.SoftwareEncoder)
-        {
-            var hw = await ProcessRunner.RunAsync([ctx.Ffmpeg, .. build(ctx.Encoder)], timeout, ct);
-            if (hw.Ok && Outputs.HasContent(output))
-                return;
-            log.LogDebug("hardware encode ({Encoder}) failed for {Output}; falling back to libx264: {Summary}",
-                ctx.Encoder, Path.GetFileName(output), hw.Summary(200));
-            Outputs.RemoveQuietly(output);
-        }
-        var result = await ProcessRunner.RunAsync([ctx.Ffmpeg, .. build(EncoderArgs.SoftwareEncoder)], timeout, ct);
-        if (!result.Ok)
-            throw new MediaException($"preview: {result.Summary()}");
-    }
-
     public static async Task GenerateAsync(
-        MediaContext ctx, MediaSource src, double duration, PreviewSpec spec, string workDir, string output,
-        CancellationToken ct, ILogger? logger = null)
+        IMediaEngine engine, MediaSource src, double duration, PreviewSpec spec, string workDir, string output, CancellationToken ct)
     {
-        var log = logger ?? NullLogger.Instance;
         if (duration <= 0)
             throw new MediaException("preview: unknown duration");
         var plan = Timing.PlanPreview(duration, spec.Segments, spec.SegmentDuration, spec.ExcludeStart, spec.ExcludeEnd, spec.Audio)
@@ -109,63 +83,12 @@ public static class PreviewGenerator
         var temp = Path.Combine(workDir, "preview.tmp.mp4");
         try
         {
-            switch (plan.Mode)
-            {
-                case PreviewMode.Single:
-                    await EncodeAsync(ctx, enc => SingleArgs(ctx.InputArgs, enc, src, duration, plan, spec, temp), temp, EncodeTimeout, log, ct);
-                    break;
-                case PreviewMode.Spliced:
-                    await EncodeAsync(ctx, enc => SplicedArgs(ctx.InputArgs, enc, src, plan, spec, temp), temp, EncodeTimeout, log, ct);
-                    break;
-                default:
-                    await ChunkedAsync(ctx, src, plan, spec, workDir, temp, log, ct);
-                    break;
-            }
+            await engine.PreviewAsync(src, duration, plan, spec, workDir, temp, ct);
             Outputs.CommitOutput(temp, output);
         }
         finally
         {
             Outputs.RemoveQuietly(temp);
-        }
-    }
-
-    private static async Task ChunkedAsync(
-        MediaContext ctx, MediaSource src, PreviewPlan plan, PreviewSpec spec, string workDir, string output, ILogger log, CancellationToken ct)
-    {
-        var chunkDir = Path.Combine(workDir, "chunks");
-        Directory.CreateDirectory(chunkDir);
-        try
-        {
-            var chunks = new List<string>();
-            for (var i = 0; i < plan.SeekTimes.Count; i++)
-            {
-                var seek = plan.SeekTimes[i];
-                var chunk = Path.Combine(chunkDir, string.Create(CultureInfo.InvariantCulture, $"chunk_{i:D3}.mp4"));
-                chunks.Add(chunk);
-                try
-                {
-                    await EncodeAsync(ctx, enc => ChunkArgs(ctx.InputArgs, enc, src, seek, plan, spec, chunk), chunk, ChunkTimeout, log, ct);
-                }
-                catch (MediaException ex)
-                {
-                    log.LogDebug("preview chunk {Index} failed: {Error}", i, ex.Message);
-                }
-            }
-
-            var valid = chunks.Where(Outputs.HasContent).ToList();
-            if (valid.Count == 0)
-                throw new MediaException("preview: no usable chunks");
-            var listPath = Path.Combine(chunkDir, "concat.txt");
-            await File.WriteAllTextAsync(listPath, string.Join("\n", valid.Select(c =>
-                "file '" + Path.GetFullPath(c).Replace('\\', '/').Replace("'", "'\\''") + "'")), ct);
-            var result = await ProcessRunner.RunAsync([ctx.Ffmpeg, .. ConcatArgs(listPath, output)], ConcatTimeout, ct);
-            if (!result.Ok)
-                throw new MediaException($"preview concat: {result.Summary()}");
-        }
-        finally
-        {
-            // The chunks are in the concatenated output now (or the preview failed).
-            Outputs.RemoveDirQuietly(chunkDir);
         }
     }
 }

@@ -6,7 +6,7 @@ namespace RemoteHeavylifter.Worker.Tests;
 /// <summary>Ported from the former Python server's test_ffmpeg_integration.py, reading local files (ffmpeg treats a path as a URL).</summary>
 public class FfmpegIntegrationTests(ClipFixture clips) : IClassFixture<ClipFixture>
 {
-    private static readonly MediaContext Ctx = MediaContext.Default;
+    private static readonly IMediaEngine Ctx = Engines.Cli;
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
     [Fact]
@@ -15,7 +15,7 @@ public class FfmpegIntegrationTests(ClipFixture clips) : IClassFixture<ClipFixtu
         Ffmpeg.RequireOrSkip();
         using var tmp = new TempDir();
         var source = Specs.Local(clips.Clip30, new FileInfo(clips.Clip30).Length);
-        Assert.Equal(30, await MediaProbe.DurationAsync(Ctx, source, Ct), 0.1);
+        Assert.Equal(30, await Ctx.ProbeDurationAsync(source, Ct), 0.1);
         var output = tmp["cover.jpg"];
         await CoverGenerator.GenerateAsync(Ctx, source, 30, Specs.Cover(), tmp.Path, output, Ct);
         var info = Image.Identify(output);
@@ -125,7 +125,7 @@ public class FfmpegIntegrationTests(ClipFixture clips) : IClassFixture<ClipFixtu
     public async Task FfmpegVersion()
     {
         Ffmpeg.RequireOrSkip();
-        Assert.StartsWith("ffmpeg version", await MediaProbe.FfmpegVersionAsync(Ctx, Ct));
-        Assert.Null(await MediaProbe.FfmpegVersionAsync(Ctx with { Ffmpeg = "/nonexistent/ffmpeg" }, Ct));
+        Assert.StartsWith("ffmpeg version", await MediaProbe.FfmpegVersionAsync(MediaContext.Default, Ct));
+        Assert.Null(await MediaProbe.FfmpegVersionAsync(MediaContext.Default with { Ffmpeg = "/nonexistent/ffmpeg" }, Ct));
     }
 }

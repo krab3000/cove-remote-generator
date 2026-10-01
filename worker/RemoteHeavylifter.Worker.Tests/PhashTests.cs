@@ -80,8 +80,8 @@ public class PhashTests(ClipFixture clips) : IClassFixture<ClipFixture>
         var source = new MediaSource(clips.Clip30, [], new FileInfo(clips.Clip30).Length);
         using var dir = new TempDir();
 
-        var first = await PhashGenerator.GenerateAsync(MediaContext.Default, source, 30, new PhashSpec(), Path.Combine(dir.Path, "a"), Ct);
-        var second = await PhashGenerator.GenerateAsync(MediaContext.Default, source, 30, new PhashSpec(), Path.Combine(dir.Path, "b"), Ct);
+        var first = await PhashGenerator.GenerateAsync(Engines.Cli, source, 30, new PhashSpec(), Path.Combine(dir.Path, "a"), Ct);
+        var second = await PhashGenerator.GenerateAsync(Engines.Cli, source, 30, new PhashSpec(), Path.Combine(dir.Path, "b"), Ct);
 
         Assert.Matches("^[0-9a-f]{1,16}$", first);
         Assert.Equal(first, second);
@@ -96,7 +96,7 @@ public class PhashTests(ClipFixture clips) : IClassFixture<ClipFixture>
         var missing = new MediaSource(Path.Combine(dir.Path, "missing.mp4"), [], 0);
 
         var ex = await Assert.ThrowsAsync<MediaException>(() =>
-            PhashGenerator.GenerateAsync(MediaContext.Default, missing, 30, new PhashSpec(), dir.Path, Ct));
+            PhashGenerator.GenerateAsync(Engines.Cli, missing, 30, new PhashSpec(), dir.Path, Ct));
         Assert.Contains("25 of 25", ex.Message);
     }
 }

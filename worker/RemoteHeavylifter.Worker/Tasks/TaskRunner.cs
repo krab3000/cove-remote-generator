@@ -23,7 +23,8 @@ public interface ITaskReporter
 /// cancelled if its session goes away.
 /// </summary>
 public sealed class TaskRunner(
-    WorkerOptions options, WorkerToken token, CoveHttpClient cove, SourceCache sourceCache, ILogger<TaskRunner> logger)
+    WorkerOptions options, WorkerToken token, CoveHttpClient cove, SourceCache sourceCache, IMediaEngine engine,
+    ILogger<TaskRunner> logger)
 {
     private static readonly IReadOnlyDictionary<string, double> Weights = new Dictionary<string, double>
     {
@@ -84,7 +85,7 @@ public sealed class TaskRunner(
         try
         {
             await cove.CheckSourceAsync(request.SourceUrl, ct);
-            var duration = await MediaProbe.DurationAsync(options.Media, MediaSource.ForCove(request.SourceUrl, token.Value, 0), ct);
+            var duration = await engine.ProbeDurationAsync(MediaSource.ForCove(request.SourceUrl, token.Value, 0), ct);
             return duration > 0
                 ? new ProbeResult(true, duration, null)
                 : new ProbeResult(false, null, "ffprobe could not read the video over HTTP");
@@ -114,7 +115,7 @@ public sealed class TaskRunner(
             var source = cached is not null
                 ? MediaSource.ForLocal(cached.LocalUrl, length)
                 : MediaSource.ForCove(request.SourceUrl, token.Value, request.SourceSize);
-            var duration = request.Duration > 0 ? request.Duration : await MediaProbe.DurationAsync(options.Media, source, ct);
+            var duration = request.Duration > 0 ? request.Duration : await engine.ProbeDurationAsync(source, ct);
             if (options.HwAccel is { } hwAccel)
             {
                 var device = NextDevice();
@@ -211,14 +212,14 @@ public sealed class TaskRunner(
             case ArtifactKinds.Cover:
             {
                 var output = Path.Combine(stepDir, "cover.jpg");
-                await CoverGenerator.GenerateAsync(options.Media, source, duration, request.Cover!, stepDir, output, ct);
+                await CoverGenerator.GenerateAsync(engine, source, duration, request.Cover!, stepDir, output, ct);
                 artifacts[step] = await UploadAsync(request, step, output, ct);
                 break;
             }
             case ArtifactKinds.Preview:
             {
                 var output = Path.Combine(stepDir, "preview.mp4");
-                await PreviewGenerator.GenerateAsync(options.Media, source, duration, request.Preview!, stepDir, output, ct, logger);
+                await PreviewGenerator.GenerateAsync(engine, source, duration, request.Preview!, stepDir, output, ct);
                 artifacts[step] = await UploadAsync(request, step, output, ct);
                 break;
             }
@@ -226,14 +227,14 @@ public sealed class TaskRunner(
             {
                 var sprite = Path.Combine(stepDir, "sprite.jpg");
                 var vtt = Path.Combine(stepDir, "thumbs.vtt");
-                await SpriteGenerator.GenerateAsync(options.Media, source, duration, request.Sprite!, stepDir, sprite, vtt, ct, logger);
+                await SpriteGenerator.GenerateAsync(engine, source, duration, request.Sprite!, stepDir, sprite, vtt, ct);
                 artifacts[ArtifactKinds.Sprite] = await UploadAsync(request, ArtifactKinds.Sprite, sprite, ct);
                 artifacts[ArtifactKinds.Vtt] = await UploadAsync(request, ArtifactKinds.Vtt, vtt, ct);
                 break;
             }
             case ArtifactKinds.Phash:
             {
-                var phash = await PhashGenerator.GenerateAsync(options.Media, source, duration, request.Phash!, stepDir, ct, logger);
+                var phash = await PhashGenerator.GenerateAsync(engine, source, duration, request.Phash!, stepDir, ct);
                 artifacts[step] = new ArtifactResult(ArtifactStates.Succeeded, null, null, null, phash);
                 break;
             }

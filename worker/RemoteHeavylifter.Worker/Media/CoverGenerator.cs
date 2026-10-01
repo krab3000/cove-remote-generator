@@ -19,23 +19,15 @@ public static class CoverGenerator
     }
 
     public static async Task GenerateAsync(
-        MediaContext ctx, MediaSource src, double duration, CoverSpec spec, string workDir, string output, CancellationToken ct)
+        IMediaEngine engine, MediaSource src, double duration, CoverSpec spec, string workDir, string output, CancellationToken ct)
     {
         var seek = Timing.CoverSeek(duration, spec.SeekSeconds);
-        var timeout = Timing.FrameDecodeTimeout(src.Size);
         // Scratch lives in the task's work dir (like preview/sprite) rather than beside the output.
         Directory.CreateDirectory(workDir);
         var temp = Path.Combine(workDir, "cover.tmp.jpg");
         try
         {
-            var result = await ProcessRunner.RunAsync(
-                [ctx.Ffmpeg, .. BuildCoverArgs(ctx.InputArgs, src, seek, spec.Filter, temp)], timeout, ct);
-            // A build without v360, or a layout the filter rejects, still gets the full frame.
-            if (!result.Ok && !string.IsNullOrEmpty(spec.Filter) && spec.FallbackWithoutFilter)
-                result = await ProcessRunner.RunAsync(
-                    [ctx.Ffmpeg, .. BuildCoverArgs(ctx.InputArgs, src, seek, null, temp)], timeout, ct);
-            if (!result.Ok)
-                throw new MediaException($"cover: {result.Summary()}");
+            await engine.CoverAsync(src, seek, spec, workDir, temp, ct);
             Outputs.CommitOutput(temp, output);
         }
         finally

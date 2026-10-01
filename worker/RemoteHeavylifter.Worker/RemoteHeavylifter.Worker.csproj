@@ -8,10 +8,14 @@
     <LangVersion>latest</LangVersion>
     <RootNamespace>RemoteHeavylifter.Worker</RootNamespace>
     <IsPackable>false</IsPackable>
+    <!-- libav is called in-process through FFmpeg.AutoGen's pointer-based bindings. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <Version>$([System.IO.File]::ReadAllText('$(MSBuildThisFileDirectory)../../VERSION').Trim())</Version>
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="FFmpeg.AutoGen.Abstractions" Version="9.0.1.1" />
+    <PackageReference Include="FFmpeg.AutoGen.Bindings.DynamicallyLoaded" Version="9.0.1.1" />
     <PackageReference Include="SixLabors.ImageSharp" Version="3.1.12" />
   </ItemGroup>
 

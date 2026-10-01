@@ -41,6 +41,32 @@ public sealed record MediaSource(string Url, IReadOnlyList<string> InputOptions,
         "-rw_timeout", "30000000",
     ], size);
 
+    /// <summary><see cref="InputOptions"/> as libav dictionary entries: <c>-headers "X: y"</c> → (<c>headers</c>, <c>X: y</c>).</summary>
+    public IEnumerable<KeyValuePair<string, string>> ProtocolOptions()
+    {
+        for (var i = 0; i + 1 < InputOptions.Count; i += 2)
+            yield return new(InputOptions[i].TrimStart('-'), InputOptions[i + 1]);
+    }
+
+    /// <summary>The hwaccel and device <see cref="DecodeOptions"/> ask for; null when decoding in software.</summary>
+    public (string Accel, string? Device)? HwDecode
+    {
+        get
+        {
+            if (DecodeOptions is not { Count: > 0 } options)
+                return null;
+            string? accel = null, device = null;
+            for (var i = 0; i + 1 < options.Count; i += 2)
+            {
+                if (options[i] == "-hwaccel")
+                    accel = options[i + 1];
+                else if (options[i] == "-hwaccel_device")
+                    device = options[i + 1];
+            }
+            return accel is null ? null : (accel, device);
+        }
+    }
+
     /// <summary><c>[..InputOptions, ..DecodeOptions, "-i", Url]</c>, the only way an input is ever added to an ffmpeg
     /// command line.</summary>
     internal IEnumerable<string> Input()

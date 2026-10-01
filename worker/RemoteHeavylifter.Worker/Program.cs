@@ -8,6 +8,7 @@ using Microsoft.Extensions.Logging;
 using RemoteHeavylifter.Protocol;
 using RemoteHeavylifter.Worker.Hosting;
 using RemoteHeavylifter.Worker.Media;
+using RemoteHeavylifter.Worker.Media.Libav;
 using RemoteHeavylifter.Worker.Tasks;
 using RemoteHeavylifter.Worker.Transport;
 
@@ -21,13 +22,35 @@ if (options.Validate() is { Count: > 0 } errors)
 
 var token = WorkerToken.Load(options);
 
-// A hwaccel this ffmpeg lacks would fail every hardware attempt before its software retry: decode in software from the start.
-string? hwAccelWarning = null;
-if (options.HwAccel is { } hwAccel
-    && !(await MediaProbe.HwAccelsAsync(options.Media, CancellationToken.None)).Contains(hwAccel, StringComparer.OrdinalIgnoreCase))
+// libav in this process when its libraries load (HL_MEDIA_ENGINE=auto|libav), else ffmpeg/ffprobe processes.
+var warnings = new List<string>();
+LibavInfo? libav = null;
+if (options.MediaEngine != "cli")
 {
-    hwAccelWarning = $"ffmpeg has no \"{hwAccel}\" hwaccel (see ffmpeg -hwaccels); decoding in software";
+    if (!LibavLoader.TryLoad(options.FfmpegLibs, out libav, out var libavFailure))
+    {
+        if (options.MediaEngine == "libav")
+        {
+            Console.Error.WriteLine($"HL_MEDIA_ENGINE=libav, but {libavFailure}.");
+            return 2;
+        }
+        warnings.Add($"libav unavailable ({libavFailure}); using the ffmpeg command line");
+    }
+}
+
+// A hwaccel or encoder ffmpeg lacks would fail every attempt before its fallback: use the fallback from the start.
+if (options.HwAccel is { } hwAccel
+    && !(libav is not null
+        ? LibavLoader.SupportsHwAccel(hwAccel)
+        : (await MediaProbe.HwAccelsAsync(options.Media, CancellationToken.None)).Contains(hwAccel, StringComparer.OrdinalIgnoreCase)))
+{
+    warnings.Add($"ffmpeg has no \"{hwAccel}\" hwaccel; decoding in software");
     options = options with { HwAccel = null, HwAccelDevices = [] };
+}
+if (libav is not null && options.Encoder != EncoderArgs.SoftwareEncoder && !LibavLoader.HasEncoder(options.Encoder))
+{
+    warnings.Add($"ffmpeg has no {options.Encoder} encoder; encoding previews with {EncoderArgs.SoftwareEncoder}");
+    options = options with { Encoder = EncoderArgs.SoftwareEncoder };
 }
 
 // Scratch from a previous run belongs to tasks no Cove is waiting for any more.
@@ -60,6 +83,18 @@ builder.Services.AddSingleton(sp =>
     var cove = sp.GetRequiredService<CoveHttpClient>();
     return new SourceCache(options.SourceCacheMb * 1024L * 1024L, cove.GetRangeAsync);
 });
+builder.Services.AddSingleton(sp => new CliMediaEngine(options.Media, sp.GetRequiredService<ILoggerFactory>().CreateLogger("Media")));
+builder.Services.AddSingleton<IMediaEngine>(sp =>
+{
+    var cli = sp.GetRequiredService<CliMediaEngine>();
+    if (libav is null)
+        return cli;
+    var loggers = sp.GetRequiredService<ILoggerFactory>();
+    var mediaLog = loggers.CreateLogger("Media");
+    var formatOptions = LibavMediaEngine.FormatOptionsFrom(options.FfmpegInputArgs,
+        ignored => mediaLog.LogWarning("HL_FFMPEG_INPUT_ARGS: -{Option} is ignored by the libav engine; use HL_HWACCEL", ignored));
+    return new LibavMediaEngine(libav, new LibavEngineOptions(options.DecodeThreads, options.MaxConcurrency, options.Encoder, formatOptions), cli, mediaLog);
+});
 builder.Services.AddSingleton<TaskRunner>();
 builder.Services.AddSingleton<WorkerFacts>();
 builder.Services.AddSingleton<CoveSession>();
@@ -69,7 +104,12 @@ if (options.CoveUrl is not null)
 var app = builder.Build();
 var log = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Worker");
 var facts = app.Services.GetRequiredService<WorkerFacts>();
-facts.FfmpegVersion = await MediaProbe.FfmpegVersionAsync(options.Media, CancellationToken.None);
+if (libav is not null)
+    LibavLog.Install(app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("libav"));
+facts.FfmpegVersion = libav is not null
+    ? $"ffmpeg version {libav.Version} (libav in-process)"
+    : await MediaProbe.FfmpegVersionAsync(options.Media, CancellationToken.None);
+var engine = app.Services.GetRequiredService<IMediaEngine>();
 
 log.LogInformation("Remote Heavylifter worker {Version} \"{Name}\": worker ID {Id} (token from {Source})",
     WorkerFacts.Version, options.Name, token.Id, token.Source);
@@ -79,8 +119,9 @@ log.LogInformation("{Capacity} parallel videos, encoder {Encoder}, decoding {Dec
         : options.HwAccelDevices.Count > 0 ? $"{options.HwAccel} on devices {string.Join(", ", options.HwAccelDevices)}" : options.HwAccel,
     options.SourceCacheMb > 0 ? $"{options.SourceCacheMb} MB" : "off",
     facts.FfmpegVersion ?? "ffmpeg NOT FOUND");
-if (hwAccelWarning is not null)
-    log.LogWarning("{Warning}", hwAccelWarning);
+log.LogInformation("Media engine: {Engine}", engine.Description);
+foreach (var warning in warnings)
+    log.LogWarning("{Warning}", warning);
 if (options.ListenUrl is not null)
     log.LogInformation("Listening for Cove on {Url}{Path}", options.ListenUrl, ProtocolInfo.WorkerSocketPath);
 if (options.CoveUrl is not null)
