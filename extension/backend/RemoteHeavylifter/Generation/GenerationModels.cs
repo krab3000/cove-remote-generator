@@ -11,8 +11,20 @@ public sealed record GenerateRequest
     public bool Preview { get; init; } = true;
     public bool Sprite { get; init; } = true;
     public bool Overwrite { get; init; }
+    public int SpriteWidth { get; init; } = SpriteSettings.DefaultWidth;
 
     public bool AnyArtifact => Cover || Preview || Sprite;
+}
+
+/// <summary>Sprite tile width. Cove's own generator uses 160; the web UI scales any tile width from the VTT.</summary>
+public static class SpriteSettings
+{
+    public const int DefaultWidth = 160;
+    public const int MinWidth = 16;   // the generation server's SpriteSpec bounds
+    public const int MaxWidth = 1920;
+    public const int MaxFrames = 81;  // Cove's 9x9 grid
+
+    public static bool IsValidWidth(int width) => width is >= MinWidth and <= MaxWidth;
 }
 
 /// <summary>Cove's preview settings, snapshotted when a run starts and clamped the way Cove clamps them.</summary>
@@ -43,6 +55,7 @@ public sealed class WorkItem
     public string? CoverFilter { get; init; }
     public string? PreviewScale { get; init; }
     public string? SpriteFilter { get; init; }
+    public int SpriteWidth { get; init; } = SpriteSettings.DefaultWidth;
 
     /// <summary>The source path as each candidate server sees it. Shrinks when a server cannot find the file.</summary>
     public required Dictionary<Guid, string> RemotePaths { get; init; }

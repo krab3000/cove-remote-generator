@@ -260,7 +260,7 @@ internal sealed class RunExecutor(
                 ? new PreviewSpec(preview.Segments, preview.SegmentDuration, preview.ExcludeStart, preview.ExcludeEnd,
                     preview.Preset, preview.Audio, PreviewSettings.Crf, PreviewSettings.Width, item.PreviewScale)
                 : null,
-            item.Sprite ? new SpriteSpec(81, 160, item.SpriteFilter, GeneratedPaths.SpriteFileName(item.VideoId)) : null);
+            item.Sprite ? new SpriteSpec(SpriteSettings.MaxFrames, item.SpriteWidth, item.SpriteFilter, GeneratedPaths.SpriteFileName(item.VideoId)) : null);
     }
 
     private async Task<RemoteTaskStatus> PollAsync(Slot slot, WorkItem item, RemoteTaskStatus status)

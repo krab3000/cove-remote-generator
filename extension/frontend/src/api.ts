@@ -78,7 +78,11 @@ export interface GenerateOptions {
   preview: boolean;
   sprite: boolean;
   overwrite: boolean;
+  /** Sprite tile width in px; older stored options may lack it. */
+  spriteWidth?: number;
 }
+
+export const SPRITE_WIDTH = { default: 160, min: 16, max: 1920 } as const;
 
 export interface LibraryFolder {
   name: string;

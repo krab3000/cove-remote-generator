@@ -45,7 +45,7 @@ compose() {
   [ "$from_source" = 1 ] && files+=(-f "$here/docker-compose.cove-source.yml")
   local profiles=()
   [ "$two_servers" = 1 ] && profiles=(--profile multi)
-  docker compose --project-directory "$here" "${files[@]}" "${profiles[@]}" "$@"
+  docker compose --project-directory "$here" "${files[@]}" ${profiles[@]+"${profiles[@]}"} "$@"
 }
 
 step() { printf '\033[36m==> %s\033[0m\n' "$*"; }
@@ -176,7 +176,7 @@ print(json.dumps(servers) if added else "")
   curl -fsS "$api/servers/health?refresh=true" | python3 -c '
 import json, sys
 for s in json.load(sys.stdin):
-    print(f"    {s[\"name\"]:<8} {s[\"state\"]}" + (f" - {s[\"error\"]}" if s["error"] else ""))'
+    print("    %-8s %s" % (s["name"], s["state"]) + (" - %s" % s["error"] if s["error"] else ""))'
 }
 
 complete_cove_setup() {

@@ -278,6 +278,39 @@ public sealed class RunExecutorTests : IDisposable
     }
 
     [Fact]
+    public async Task Sprite_spec_carries_the_item_sprite_width()
+    {
+        var a = new FakeServer("a");
+        var sprites = new ConcurrentDictionary<int, SpriteSpec>();
+        a.OnSubmit = request => sprites[request.VideoId] = request.Sprite!;
+        var items = Items(2, a);
+        items[1] = new WorkItem
+        {
+            VideoId = items[1].VideoId,
+            Label = items[1].Label,
+            CovePath = items[1].CovePath,
+            Duration = items[1].Duration,
+            Sprite = true,
+            SpriteWidth = 320,
+            RemotePaths = items[1].RemotePaths,
+        };
+        await RunAsync(items, false, TestContext.Current.CancellationToken, (a, 1));
+
+        Assert.Equal(SpriteSettings.DefaultWidth, sprites[1].FrameWidth);
+        Assert.Equal(320, sprites[2].FrameWidth);
+        Assert.Equal(SpriteSettings.MaxFrames, sprites[2].MaxFrames);
+    }
+
+    [Theory]
+    [InlineData(15, false)]
+    [InlineData(16, true)]
+    [InlineData(320, true)]
+    [InlineData(1920, true)]
+    [InlineData(1921, false)]
+    public void Sprite_width_bounds_match_the_server_contract(int width, bool valid)
+        => Assert.Equal(valid, SpriteSettings.IsValidWidth(width));
+
+    [Fact]
     public async Task Partial_results_commit_only_what_succeeded()
     {
         var a = new FakeServer("a") { Behavior = _ => (RemoteTaskStates.Partial, null, [ArtifactKinds.Preview]) };

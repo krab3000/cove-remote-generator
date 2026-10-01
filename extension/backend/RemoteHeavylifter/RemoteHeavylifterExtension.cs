@@ -73,6 +73,8 @@ public sealed class RemoteHeavylifterExtension : JobExtensionBase, IApiExtension
             .AddSettingsTab(
                 SettingsTabKey,
                 "Remote Generation",
+                // Page layout: the panels draw their own headers, so skip the host's per-panel card chrome.
+                SettingsTabLayout.Page,
                 order: 60,
                 icon: "server",
                 description: "Generate covers, previews and sprites on remote servers.",

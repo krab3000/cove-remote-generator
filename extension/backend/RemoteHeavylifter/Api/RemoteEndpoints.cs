@@ -151,6 +151,11 @@ internal static class RemoteEndpoints
     {
         if (!request.AnyArtifact)
             return Results.BadRequest(new ErrorBody("NO_ARTIFACTS", "Select at least one of covers, previews or sprites."));
+        if (request.Sprite && !SpriteSettings.IsValidWidth(request.SpriteWidth))
+        {
+            return Results.BadRequest(new ErrorBody("INVALID_SPRITE_WIDTH",
+                $"Sprite tile width must be between {SpriteSettings.MinWidth} and {SpriteSettings.MaxWidth} px."));
+        }
         if (request.ServerIds.Count == 0)
             return Results.BadRequest(new ErrorBody("NO_SERVERS", "Select at least one generation server."));
 

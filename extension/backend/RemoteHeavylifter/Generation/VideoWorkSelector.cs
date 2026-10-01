@@ -37,6 +37,8 @@ public sealed class VideoWorkSelector(DbContext db)
         CancellationToken ct)
     {
         var filters = PathFilter.Normalize(request.Paths);
+        // The task-list job replays stored options, so an out-of-range width falls back instead of failing every video.
+        var spriteWidth = SpriteSettings.IsValidWidth(request.SpriteWidth) ? request.SpriteWidth : SpriteSettings.DefaultWidth;
         var work = new List<WorkItem>();
         var settled = new List<SettledItem>();
         var examined = 0;
@@ -143,7 +145,8 @@ public sealed class VideoWorkSelector(DbContext db)
                     Sprite = sprite,
                     CoverFilter = VrFilter.OneEyeFlat(vr, 1920),
                     PreviewScale = VrFilter.OneEyeFlat(vr, PreviewSettings.Width) ?? $"scale={PreviewSettings.Width}:-2",
-                    SpriteFilter = VrFilter.OneEyeFlat(vr, 160),
+                    SpriteFilter = VrFilter.OneEyeFlat(vr, spriteWidth),
+                    SpriteWidth = spriteWidth,
                     RemotePaths = remotePaths,
                 });
             }
