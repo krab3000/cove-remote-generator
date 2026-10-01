@@ -6,8 +6,20 @@ namespace RemoteHeavylifter.Worker.Media;
 /// <param name="InputOptions">Per-input ffmpeg options placed immediately before every <c>-i</c> of this source,
 /// because ffmpeg applies input options only to the next input.</param>
 /// <param name="Size">Byte size as reported by Cove; only shapes decode timeouts (&lt;= 0 means the minimum).</param>
-public sealed record MediaSource(string Url, IReadOnlyList<string> InputOptions, long Size)
+/// <param name="DecodeOptions">Hardware decoding options (<c>-hwaccel cuda</c> …), placed after <paramref name="InputOptions"/>
+/// before every <c>-i</c> of an ffmpeg command; never given to ffprobe. Null decodes in software.</param>
+public sealed record MediaSource(string Url, IReadOnlyList<string> InputOptions, long Size, IReadOnlyList<string>? DecodeOptions = null)
 {
+    public bool HardwareDecode => DecodeOptions is { Count: > 0 };
+
+    /// <summary>The same source decoded in software: the fallback when hardware decoding fails.</summary>
+    public MediaSource Software => HardwareDecode ? this with { DecodeOptions = null } : this;
+
+    /// <summary><c>-hwaccel {accel} [-hwaccel_device {device}]</c>; frames come back to system memory, so the CPU
+    /// filters (scale, v360) and encoders work unchanged.</summary>
+    public MediaSource WithHardwareDecode(string accel, string? device) =>
+        this with { DecodeOptions = device is null ? ["-hwaccel", accel] : ["-hwaccel", accel, "-hwaccel_device", device] };
+
     /// <summary>A Cove-served source: the worker token on every request, and reconnects so a dropped
     /// connection mid-encode resumes with a range request instead of failing the artifact.</summary>
     public static MediaSource ForCove(string url, string token, long size) => new(url,
@@ -19,10 +31,23 @@ public sealed record MediaSource(string Url, IReadOnlyList<string> InputOptions,
         "-rw_timeout", "30000000",
     ], size);
 
-    /// <summary><c>[..InputOptions, "-i", Url]</c>, the only way an input is ever added to a command line.</summary>
+    /// <summary>The worker's own loopback copy of a Cove source (<see cref="Transport.SourceCache"/>): no token, same
+    /// reconnects, since a failed upstream fetch drops the connection and ffmpeg resumes with a range request.</summary>
+    public static MediaSource ForLocal(string url, long size) => new(url,
+    [
+        "-reconnect", "1",
+        "-reconnect_on_network_error", "1",
+        "-reconnect_delay_max", "5",
+        "-rw_timeout", "30000000",
+    ], size);
+
+    /// <summary><c>[..InputOptions, ..DecodeOptions, "-i", Url]</c>, the only way an input is ever added to an ffmpeg
+    /// command line.</summary>
     internal IEnumerable<string> Input()
     {
         foreach (var option in InputOptions)
+            yield return option;
+        foreach (var option in DecodeOptions ?? [])
             yield return option;
         yield return "-i";
         yield return Url;

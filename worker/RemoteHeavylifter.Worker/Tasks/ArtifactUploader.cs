@@ -10,13 +10,20 @@ namespace RemoteHeavylifter.Worker.Tasks;
 /// <summary>Raised when Cove's HTTP endpoints cannot be reached (or refuse the worker), as opposed to a generation failure.</summary>
 public sealed class CoveUnreachableException(string message, Exception? inner = null) : Exception(message, inner);
 
+/// <summary>Cove answered a source read with a 4xx; retrying will not help.</summary>
+public sealed class SourceRefusedException(int status, string message) : Exception(message)
+{
+    public int Status { get; } = status;
+}
+
 /// <summary>Talks to the extension's worker HTTP endpoints: checks a source is readable and uploads artifacts.</summary>
 public sealed class CoveHttpClient(HttpClient http, WorkerToken token)
 {
     private const int UploadAttempts = 3;
 
-    /// <summary>A HEAD on the source, so an unreachable Cove (or a refused token) fails fast and is reported as such.</summary>
-    public async Task CheckSourceAsync(string url, CancellationToken ct)
+    /// <summary>A HEAD on the source, so an unreachable Cove (or a refused token) fails fast and is reported as such.
+    /// Returns the source's byte length when Cove sends one.</summary>
+    public async Task<long?> CheckSourceAsync(string url, CancellationToken ct)
     {
         using var request = new HttpRequestMessage(HttpMethod.Head, url);
         request.Headers.Add(ProtocolInfo.TokenHeader, token.Value);
@@ -35,6 +42,38 @@ public sealed class CoveHttpClient(HttpClient http, WorkerToken token)
         {
             if (!response.IsSuccessStatusCode)
                 throw new CoveUnreachableException($"Cove refused the source ({(int)response.StatusCode} {Describe(response.StatusCode)})");
+            return response.Content.Headers.ContentLength;
+        }
+    }
+
+    /// <summary>Bytes <paramref name="from"/>..<paramref name="to"/> (inclusive) of the source. Retries transient
+    /// failures; a refusal (4xx) is a <see cref="SourceRefusedException"/>.</summary>
+    public async Task<byte[]> GetRangeAsync(string url, long from, long to, CancellationToken ct)
+    {
+        var expected = to - from + 1;
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                using var request = new HttpRequestMessage(HttpMethod.Get, url);
+                request.Headers.Add(ProtocolInfo.TokenHeader, token.Value);
+                request.Headers.Range = new RangeHeaderValue(from, to);
+                using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
+                var status = (int)response.StatusCode;
+                if (status is >= 400 and < 500)
+                    throw new SourceRefusedException(status, $"Cove refused the source ({status} {Describe(response.StatusCode)})");
+                if (response.StatusCode != HttpStatusCode.PartialContent)
+                    throw new HttpRequestException($"Cove answered a range request with {status}");
+                var bytes = await response.Content.ReadAsByteArrayAsync(ct);
+                if (bytes.Length != expected)
+                    throw new HttpRequestException($"Cove sent {bytes.Length} of {expected} requested bytes");
+                return bytes;
+            }
+            catch (Exception ex) when (attempt < UploadAttempts && !ct.IsCancellationRequested
+                                       && ex is HttpRequestException or IOException or OperationCanceledException)
+            {
+                await Task.Delay(TimeSpan.FromSeconds(attempt), ct);
+            }
         }
     }
 

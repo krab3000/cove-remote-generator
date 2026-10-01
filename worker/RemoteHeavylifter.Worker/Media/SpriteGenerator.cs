@@ -19,7 +19,7 @@ public static class SpriteGenerator
     internal static int PerFrameArgLength(MediaSource source, string frameDir, int count, int scaleWidth, string? preFilter)
     {
         var last = FramePath(frameDir, Math.Max(0, count - 1));
-        var sourceLength = source.Url.Length + source.InputOptions.Sum(o => o.Length + 1);
+        var sourceLength = source.Url.Length + source.InputOptions.Concat(source.DecodeOptions ?? []).Sum(o => o.Length + 1);
         var length = sourceLength + 28 + last.Length + 72 + (scaleWidth > 0 ? 22 : 0);
         return length + (preFilter is not null ? preFilter.Length + 1 : 0);
     }
@@ -53,10 +53,20 @@ public static class SpriteGenerator
         Directory.CreateDirectory(frameDir);
         var length = PerFrameArgLength(source, frameDir, timestamps.Count, scaleWidth, preFilter);
         var frames = new string?[timestamps.Count];
-        foreach (var (start, count) in Timing.PlanBatches(length, timestamps.Count))
+        // Every input of a batch opens its own decoder, which on a GPU holds video memory: keep hardware batches small.
+        var batchSize = source.HardwareDecode ? Timing.HardwareSpriteBatchSize : Timing.SpriteBatchSize;
+        foreach (var (start, count) in Timing.PlanBatches(length, timestamps.Count, batchSize))
         {
-            var args = SpriteBatchArgs(source, frameDir, timestamps, start, count, scaleWidth, preFilter);
-            var result = await ProcessRunner.RunAsync([ctx.Ffmpeg, .. args], TimeSpan.FromSeconds(60 + 6 * count), ct);
+            var timeout = TimeSpan.FromSeconds(60 + 6 * count);
+            var result = await ProcessRunner.RunAsync(
+                [ctx.Ffmpeg, .. SpriteBatchArgs(source, frameDir, timestamps, start, count, scaleWidth, preFilter)], timeout, ct);
+            if (!result.Ok && source.HardwareDecode)
+            {
+                log.LogDebug("sprite batch {First}-{Last} with hardware decoding: {Summary}; retrying in software",
+                    start, start + count - 1, result.Summary(200));
+                result = await ProcessRunner.RunAsync(
+                    [ctx.Ffmpeg, .. SpriteBatchArgs(source.Software, frameDir, timestamps, start, count, scaleWidth, preFilter)], timeout, ct);
+            }
             if (!result.Ok)
             {
                 // Frames that did decode are still on disk and still count.
@@ -81,20 +91,24 @@ public static class SpriteGenerator
             throw new MediaException("sprite: unknown duration");
         var plan = Timing.PlanSprite(duration, spec.MaxFrames);
         var frameDir = Path.Combine(workDir, "frames");
-        var frames = await ExtractFramesAsync(ctx, src, plan.Timestamps, spec.FrameWidth, spec.PreFilter, frameDir, log, ct);
-
-        var sources = Timing.FillGaps(frames.Select(f => f is not null).ToList());
-        if (sources is null)
-        {
-            var decoded = frames.Count(f => f is not null);
-            throw new MediaException($"sprite: only {decoded}/{plan.FrameCount} frames could be decoded");
-        }
-
         var images = new Dictionary<int, Image<Rgb24>>();
         try
         {
-            foreach (var index in sources.Distinct())
-                images[index] = await Image.LoadAsync<Rgb24>(frames[index]!, ct);
+            IReadOnlyList<int> sources;
+            try
+            {
+                var frames = await ExtractFramesAsync(ctx, src, plan.Timestamps, spec.FrameWidth, spec.PreFilter, frameDir, log, ct);
+                sources = Timing.FillGaps(frames.Select(f => f is not null).ToList())
+                    ?? throw new MediaException($"sprite: only {frames.Count(f => f is not null)}/{plan.FrameCount} frames could be decoded");
+                foreach (var index in sources.Distinct())
+                    images[index] = await Image.LoadAsync<Rgb24>(frames[index]!, ct);
+            }
+            finally
+            {
+                // The frames are in memory now; their files are not needed any more.
+                Outputs.RemoveDirQuietly(frameDir);
+            }
+
             var first = images[sources[0]];
             int fw = first.Width, fh = first.Height;
             using var sheet = new Image<Rgb24>(fw * plan.Cols, fh * plan.Rows);

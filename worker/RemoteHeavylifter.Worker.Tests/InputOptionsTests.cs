@@ -1,3 +1,4 @@
+using RemoteHeavylifter.Worker.Hosting;
 using RemoteHeavylifter.Worker.Media;
 
 namespace RemoteHeavylifter.Worker.Tests;
@@ -124,5 +125,49 @@ public class InputOptionsTests
         Assert.Equal(TimeSpan.FromSeconds(30), Timing.FrameDecodeTimeout(-1));
         Assert.Equal(TimeSpan.FromSeconds(130), Timing.FrameDecodeTimeout(5L << 30));
         Assert.Equal(TimeSpan.FromSeconds(150), Timing.FrameDecodeTimeout(100L << 30));
+    }
+
+    [Fact]
+    public void HardwareDecodeOptionsFollowTheSourceOptionsBeforeEveryInput()
+    {
+        var hw = Source.WithHardwareDecode("cuda", "1");
+        string[] decode = ["-hwaccel", "cuda", "-hwaccel_device", "1"];
+        Assert.True(hw.HardwareDecode);
+
+        var timestamps = Enumerable.Range(0, 6).Select(i => i * 2.0 + 1).ToArray();
+        var args = SpriteGenerator.SpriteBatchArgs(hw, "/tmp/f", timestamps, 0, 6, 160, null);
+        var inputs = 0;
+        for (var i = 0; i < args.Count; i++)
+        {
+            if (args[i] != "-i")
+                continue;
+            inputs++;
+            Assert.Equal([.. Options, .. decode], args.Skip(i - Options.Length - decode.Length).Take(Options.Length + decode.Length));
+        }
+        Assert.Equal(6, inputs);
+        Assert.Equal(6, args.Count(a => a == "-hwaccel"));
+
+        // ffprobe has no -hwaccel; the software source has neither.
+        Assert.DoesNotContain("-hwaccel", MediaProbe.DurationArgs(MediaContext.Default, hw));
+        Assert.Equal(Source, hw.Software);
+        Assert.Equal(["-hwaccel", "d3d11va"], Source.WithHardwareDecode("d3d11va", null).DecodeOptions);
+
+        var plain = SpriteGenerator.PerFrameArgLength(Source, "/tmp/f", 81, 160, null);
+        Assert.Equal(plain + decode.Sum(o => o.Length + 1), SpriteGenerator.PerFrameArgLength(hw, "/tmp/f", 81, 160, null));
+    }
+
+    [Fact]
+    public void HwAccelSettings()
+    {
+        var env = new Dictionary<string, string> { ["HL_COVE_URL"] = "http://cove", ["HL_HWACCEL"] = "cuda", ["HL_HWACCEL_DEVICES"] = " 0, 1 " };
+        var options = WorkerOptions.FromEnvironment(env.GetValueOrDefault);
+        Assert.Equal("cuda", options.HwAccel);
+        Assert.Equal(["0", "1"], options.HwAccelDevices);
+        Assert.Empty(options.Validate());
+
+        env["HL_HWACCEL"] = "none";
+        options = WorkerOptions.FromEnvironment(env.GetValueOrDefault);
+        Assert.Null(options.HwAccel);
+        Assert.Contains(options.Validate(), e => e.Contains("HL_HWACCEL_DEVICES"));
     }
 }

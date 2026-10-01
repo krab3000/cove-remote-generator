@@ -27,6 +27,27 @@ public static class Outputs
         }
     }
 
+    /// <summary>Delete a scratch directory now. Windows may keep a killed ffmpeg's handles open for a moment, so retry
+    /// briefly; whatever still remains goes with the task directory or the next start.</summary>
+    public static void RemoveDirQuietly(string path)
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                if (Directory.Exists(path))
+                    Directory.Delete(path, recursive: true);
+                return;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                if (attempt >= 5)
+                    return;
+                Thread.Sleep(50 * attempt);
+            }
+        }
+    }
+
     internal static bool HasContent(string path)
     {
         var info = new FileInfo(path);

@@ -33,6 +33,8 @@ public static class Timing
 
     public const double SpriteMinDecodedRatio = 0.9;
     public const int SpriteBatchSize = 24;
+    /// <summary>Inputs per frame-extraction ffmpeg when decoding on a GPU: each holds a hardware decoder and its surfaces.</summary>
+    public const int HardwareSpriteBatchSize = 6;
     public const int SpriteMaxCommandLine = 24000;
 
     /// <summary>Cove's <c>ToString("F&lt;n&gt;", InvariantCulture)</c>: .NET formats the exact binary value and rounds

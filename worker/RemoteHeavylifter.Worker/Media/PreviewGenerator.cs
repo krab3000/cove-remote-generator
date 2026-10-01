@@ -134,30 +134,38 @@ public static class PreviewGenerator
     {
         var chunkDir = Path.Combine(workDir, "chunks");
         Directory.CreateDirectory(chunkDir);
-        var chunks = new List<string>();
-        for (var i = 0; i < plan.SeekTimes.Count; i++)
+        try
         {
-            var seek = plan.SeekTimes[i];
-            var chunk = Path.Combine(chunkDir, string.Create(CultureInfo.InvariantCulture, $"chunk_{i:D3}.mp4"));
-            chunks.Add(chunk);
-            try
+            var chunks = new List<string>();
+            for (var i = 0; i < plan.SeekTimes.Count; i++)
             {
-                await EncodeAsync(ctx, enc => ChunkArgs(ctx.InputArgs, enc, src, seek, plan, spec, chunk), chunk, ChunkTimeout, log, ct);
+                var seek = plan.SeekTimes[i];
+                var chunk = Path.Combine(chunkDir, string.Create(CultureInfo.InvariantCulture, $"chunk_{i:D3}.mp4"));
+                chunks.Add(chunk);
+                try
+                {
+                    await EncodeAsync(ctx, enc => ChunkArgs(ctx.InputArgs, enc, src, seek, plan, spec, chunk), chunk, ChunkTimeout, log, ct);
+                }
+                catch (MediaException ex)
+                {
+                    log.LogDebug("preview chunk {Index} failed: {Error}", i, ex.Message);
+                }
             }
-            catch (MediaException ex)
-            {
-                log.LogDebug("preview chunk {Index} failed: {Error}", i, ex.Message);
-            }
-        }
 
-        var valid = chunks.Where(Outputs.HasContent).ToList();
-        if (valid.Count == 0)
-            throw new MediaException("preview: no usable chunks");
-        var listPath = Path.Combine(chunkDir, "concat.txt");
-        await File.WriteAllTextAsync(listPath, string.Join("\n", valid.Select(c =>
-            "file '" + Path.GetFullPath(c).Replace('\\', '/').Replace("'", "'\\''") + "'")), ct);
-        var result = await ProcessRunner.RunAsync([ctx.Ffmpeg, .. ConcatArgs(listPath, output)], ConcatTimeout, ct);
-        if (!result.Ok)
-            throw new MediaException($"preview concat: {result.Summary()}");
+            var valid = chunks.Where(Outputs.HasContent).ToList();
+            if (valid.Count == 0)
+                throw new MediaException("preview: no usable chunks");
+            var listPath = Path.Combine(chunkDir, "concat.txt");
+            await File.WriteAllTextAsync(listPath, string.Join("\n", valid.Select(c =>
+                "file '" + Path.GetFullPath(c).Replace('\\', '/').Replace("'", "'\\''") + "'")), ct);
+            var result = await ProcessRunner.RunAsync([ctx.Ffmpeg, .. ConcatArgs(listPath, output)], ConcatTimeout, ct);
+            if (!result.Ok)
+                throw new MediaException($"preview concat: {result.Summary()}");
+        }
+        finally
+        {
+            // The chunks are in the concatenated output now (or the preview failed).
+            Outputs.RemoveDirQuietly(chunkDir);
+        }
     }
 }

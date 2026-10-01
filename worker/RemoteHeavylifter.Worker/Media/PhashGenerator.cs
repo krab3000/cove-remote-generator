@@ -37,21 +37,30 @@ public static class PhashGenerator
         if (columns * columns != spec.FrameCount)
             throw new MediaException($"phash: {spec.FrameCount} frames do not form a square grid");
 
-        // No VR pre-filter: Cove hashes the frame as stored, so a VR video's hash covers both eyes like Cove's does.
-        var paths = await SpriteGenerator.ExtractFramesAsync(
-            ctx, src, Timestamps(duration, spec.FrameCount), spec.FrameWidth, preFilter: null, Path.Combine(workDir, "frames"), log, ct);
-
-        // Unlike a sprite, a hash cannot borrow a neighbouring frame: that would give a hash no other extraction of
-        // the same file reproduces. Any missing frame means no hash (as in Cove).
-        var missing = paths.Count(p => p is null);
-        if (missing > 0)
-            throw new MediaException($"phash: {missing} of {paths.Length} sample frames could not be decoded");
-
-        var frames = new Image<Rgba32>[paths.Length];
+        var frameDir = Path.Combine(workDir, "frames");
+        var frames = new Image<Rgba32>[spec.FrameCount];
         try
         {
-            for (var i = 0; i < paths.Length; i++)
-                frames[i] = await Image.LoadAsync<Rgba32>(paths[i]!, ct);
+            try
+            {
+                // No VR pre-filter: Cove hashes the frame as stored, so a VR video's hash covers both eyes like Cove's does.
+                var paths = await SpriteGenerator.ExtractFramesAsync(
+                    ctx, src, Timestamps(duration, spec.FrameCount), spec.FrameWidth, preFilter: null, frameDir, log, ct);
+
+                // Unlike a sprite, a hash cannot borrow a neighbouring frame: that would give a hash no other extraction of
+                // the same file reproduces. Any missing frame means no hash (as in Cove).
+                var missing = paths.Count(p => p is null);
+                if (missing > 0)
+                    throw new MediaException($"phash: {missing} of {paths.Length} sample frames could not be decoded");
+
+                for (var i = 0; i < paths.Length; i++)
+                    frames[i] = await Image.LoadAsync<Rgba32>(paths[i]!, ct);
+            }
+            finally
+            {
+                // The frames are in memory now; their files are not needed any more.
+                Outputs.RemoveDirQuietly(frameDir);
+            }
             return HashGrid(frames, columns);
         }
         finally

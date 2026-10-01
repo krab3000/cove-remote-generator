@@ -24,6 +24,15 @@ public sealed record WorkerOptions
     public IReadOnlyList<string> FfmpegInputArgs { get; init; } = [];
     public string Encoder { get; init; } = EncoderArgs.SoftwareEncoder;
 
+    /// <summary>ffmpeg hwaccel for decoding sources, e.g. <c>cuda</c>; null decodes in software.</summary>
+    public string? HwAccel { get; init; }
+
+    /// <summary>Hardware decoding devices (e.g. GPU indexes 0 and 1); tasks take them in turn. Empty uses ffmpeg's default.</summary>
+    public IReadOnlyList<string> HwAccelDevices { get; init; } = [];
+
+    /// <summary>RAM for source bytes shared by all running tasks; 0 makes ffmpeg read straight from Cove.</summary>
+    public int SourceCacheMb { get; init; } = 1024;
+
     public string TasksDir => Path.Combine(DataDir, "tasks");
 
     public MediaContext Media => new(Ffmpeg, Ffprobe, FfmpegInputArgs, Encoder);
@@ -48,6 +57,11 @@ public sealed record WorkerOptions
             Ffprobe = Get("HL_FFPROBE") ?? defaults.Ffprobe,
             FfmpegInputArgs = Get("HL_FFMPEG_INPUT_ARGS")?.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries) ?? [],
             Encoder = Get("HL_H264_ENCODER") ?? defaults.Encoder,
+            HwAccel = Get("HL_HWACCEL") is { } accel && !accel.Equals("none", StringComparison.OrdinalIgnoreCase) ? accel : null,
+            HwAccelDevices = Get("HL_HWACCEL_DEVICES")?.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries) ?? [],
+            SourceCacheMb = int.TryParse(Get("HL_SOURCE_CACHE_MB"), NumberStyles.Integer, CultureInfo.InvariantCulture, out var cache) && cache >= 0
+                ? cache
+                : defaults.SourceCacheMb,
         };
     }
 
@@ -61,6 +75,8 @@ public sealed record WorkerOptions
             errors.Add("HL_LISTEN_URL must be an http:// or https:// address, e.g. http://0.0.0.0:8750.");
         if (CoveUrl is not null && !IsHttp(CoveUrl))
             errors.Add("HL_COVE_URL must be Cove's http:// or https:// address, e.g. http://192.168.1.10:5073.");
+        if (HwAccelDevices.Count > 0 && HwAccel is null)
+            errors.Add("HL_HWACCEL_DEVICES needs HL_HWACCEL, e.g. HL_HWACCEL=cuda.");
         if (Token is { Length: < Protocol.WorkerTokens.MinLength })
             errors.Add($"HL_WORKER_TOKEN must be at least {Protocol.WorkerTokens.MinLength} characters.");
         return errors;

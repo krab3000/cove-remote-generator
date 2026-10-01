@@ -1,8 +1,16 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Globalization;
 using System.Text.Json.Nodes;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Logging;
 using RemoteHeavylifter.Protocol;
+using RemoteHeavylifter.Worker.Hosting;
 using RemoteHeavylifter.Worker.Media;
+using RemoteHeavylifter.Worker.Tasks;
+using RemoteHeavylifter.Worker.Transport;
 
 namespace RemoteHeavylifter.Worker.Tests;
 
@@ -121,5 +129,85 @@ public sealed class TempDir : IDisposable
         catch (IOException)
         {
         }
+    }
+}
+
+/// <summary>Serves a file the way Cove serves a source (token header, range requests).</summary>
+internal sealed class FakeCove : IAsyncDisposable
+{
+    public const string Token = "t0ken";
+
+    private readonly WebApplication _app;
+
+    private FakeCove(WebApplication app) => _app = app;
+
+    public ConcurrentQueue<(bool Authorized, string? Range)> Requests { get; } = new();
+
+    public string Url => _app.Urls.First().TrimEnd('/') + "/source/7";
+
+    public long Length { get; private set; }
+
+    /// <summary>Serves <paramref name="clip"/> (any file) the way Cove serves a source.</summary>
+    public static async Task<FakeCove> StartAsync(string clip)
+    {
+        var builder = WebApplication.CreateSlimBuilder();
+        builder.Logging.ClearProviders();
+        builder.WebHost.UseUrls("http://127.0.0.1:0");
+        var app = builder.Build();
+        var cove = new FakeCove(app) { Length = new FileInfo(clip).Length };
+        app.MapGet("/source/7", (HttpContext http) =>
+        {
+            var authorized = http.Request.Headers[ProtocolInfo.TokenHeader] == Token;
+            cove.Requests.Enqueue((authorized, http.Request.Headers.Range.FirstOrDefault()));
+            return authorized ? Results.File(clip, "video/mp4", enableRangeProcessing: true) : Results.Unauthorized();
+        });
+        await app.StartAsync();
+        return cove;
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        await _app.StopAsync();
+        await _app.DisposeAsync();
+    }
+}
+
+
+/// <summary>A worker's loopback <see cref="SourceCache"/> endpoint, reading from Cove with <paramref name="token"/>.</summary>
+internal sealed class CacheHost : IAsyncDisposable
+{
+    private readonly WebApplication _app;
+    private readonly HttpClient _upstream;
+
+    private CacheHost(WebApplication app, HttpClient upstream, SourceCache cache)
+    {
+        _app = app;
+        _upstream = upstream;
+        Cache = cache;
+    }
+
+    public SourceCache Cache { get; }
+
+    public static async Task<CacheHost> StartAsync(long budgetBytes, string token = FakeCove.Token)
+    {
+        var upstream = new HttpClient();
+        var cove = new CoveHttpClient(upstream, WorkerToken.Load(new WorkerOptions { Token = token }));
+        var cache = new SourceCache(budgetBytes, cove.GetRangeAsync);
+        var builder = WebApplication.CreateSlimBuilder();
+        builder.Logging.ClearProviders();
+        builder.WebHost.UseUrls("http://127.0.0.1:0");
+        var app = builder.Build();
+        app.MapMethods(SourceCache.PathPrefix + "{key}", [HttpMethods.Get, HttpMethods.Head],
+            (HttpContext http, string key) => cache.ServeAsync(http, key));
+        await app.StartAsync();
+        cache.SetLocalBase(app.Urls.First());
+        return new CacheHost(app, upstream, cache);
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        await _app.StopAsync();
+        await _app.DisposeAsync();
+        _upstream.Dispose();
     }
 }

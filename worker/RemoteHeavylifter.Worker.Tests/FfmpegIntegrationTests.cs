@@ -63,6 +63,7 @@ public class FfmpegIntegrationTests(ClipFixture clips) : IClassFixture<ClipFixtu
         var spec = Specs.Preview(preset: "ultrafast", audio: true, segments: 4);
         await PreviewGenerator.GenerateAsync(Ctx, Specs.Local(loud), 12, spec, tmp["w"], output, Ct);
         Assert.Equal(4 * 0.75, Ffmpeg.ProbeStream(output).Duration, 0.4);
+        Assert.False(Directory.Exists(Path.Combine(tmp["w"], "chunks")), "preview chunks are deleted after concat");
     }
 
     [Fact]
@@ -77,6 +78,35 @@ public class FfmpegIntegrationTests(ClipFixture clips) : IClassFixture<ClipFixtu
         var text = await File.ReadAllTextAsync(vtt, Ct);
         Assert.StartsWith("WEBVTT\n\n00:00:00.000 --> 00:00:02.000\n9_sprite.jpg#xywh=0,0,160,90\n", text);
         Assert.Equal(15, text.Split("#xywh=").Length - 1);
+        Assert.False(Directory.Exists(tmp["frames"]), "sprite frames are deleted once loaded");
+    }
+
+    [Fact]
+    public async Task SpriteAndCoverWithCudaDecoding()
+    {
+        // Without an NVIDIA GPU ffmpeg itself falls back to software decoding, so this passes either way.
+        Ffmpeg.RequireOrSkip();
+        using var tmp = new TempDir();
+        var source = Specs.Local(clips.Clip30).WithHardwareDecode("cuda", null);
+        string sprite = tmp["s.jpg"], vtt = tmp["t.vtt"];
+        await SpriteGenerator.GenerateAsync(Ctx, source, 30, Specs.Sprite("9_sprite.jpg"), tmp.Path, sprite, vtt, Ct);
+        var info = Image.Identify(sprite);
+        Assert.Equal((160 * 4, 90 * 4), (info.Width, info.Height));
+        Assert.Equal(15, (await File.ReadAllTextAsync(vtt, Ct)).Split("#xywh=").Length - 1);
+
+        await CoverGenerator.GenerateAsync(Ctx, source, 30, Specs.Cover(), tmp.Path, tmp["cover.jpg"], Ct);
+        Assert.Equal((320, 180), (Image.Identify(tmp["cover.jpg"]).Width, Image.Identify(tmp["cover.jpg"]).Height));
+    }
+
+    [Fact]
+    public async Task FailingHardwareDecodeRetriesBatchesInSoftware()
+    {
+        Ffmpeg.RequireOrSkip();
+        using var tmp = new TempDir();
+        var source = Specs.Local(clips.Clip30).WithHardwareDecode("definitely_not_a_hwaccel", null);
+        string sprite = tmp["s.jpg"], vtt = tmp["t.vtt"];
+        await SpriteGenerator.GenerateAsync(Ctx, source, 30, Specs.Sprite("9_sprite.jpg"), tmp.Path, sprite, vtt, Ct);
+        Assert.Equal((160 * 4, 90 * 4), (Image.Identify(sprite).Width, Image.Identify(sprite).Height));
     }
 
     [Fact]

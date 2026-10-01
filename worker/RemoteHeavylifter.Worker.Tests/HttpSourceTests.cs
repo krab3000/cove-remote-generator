@@ -1,8 +1,3 @@
-using System.Collections.Concurrent;
-using Microsoft.AspNetCore.Builder;
-using Microsoft.AspNetCore.Hosting;
-using Microsoft.AspNetCore.Http;
-using Microsoft.Extensions.Logging;
 using RemoteHeavylifter.Protocol;
 using RemoteHeavylifter.Worker.Media;
 using SixLabors.ImageSharp;
@@ -12,42 +7,8 @@ namespace RemoteHeavylifter.Worker.Tests;
 /// <summary>Serves a clip the way Cove does (token header, range requests) and generates from the URL.</summary>
 public class HttpSourceTests(ClipFixture clips) : IClassFixture<ClipFixture>
 {
-    private const string Token = "t0ken";
+    private const string Token = FakeCove.Token;
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
-
-    private sealed class FakeCove : IAsyncDisposable
-    {
-        private readonly WebApplication _app;
-
-        private FakeCove(WebApplication app) => _app = app;
-
-        public ConcurrentQueue<(bool Authorized, string? Range)> Requests { get; } = new();
-
-        public string Url => _app.Urls.First().TrimEnd('/') + "/source/7";
-
-        public static async Task<FakeCove> StartAsync(string clip)
-        {
-            var builder = WebApplication.CreateSlimBuilder();
-            builder.Logging.ClearProviders();
-            builder.WebHost.UseUrls("http://127.0.0.1:0");
-            var app = builder.Build();
-            var cove = new FakeCove(app);
-            app.MapGet("/source/7", (HttpContext http) =>
-            {
-                var authorized = http.Request.Headers[ProtocolInfo.TokenHeader] == Token;
-                cove.Requests.Enqueue((authorized, http.Request.Headers.Range.FirstOrDefault()));
-                return authorized ? Results.File(clip, "video/mp4", enableRangeProcessing: true) : Results.Unauthorized();
-            });
-            await app.StartAsync();
-            return cove;
-        }
-
-        public async ValueTask DisposeAsync()
-        {
-            await _app.StopAsync();
-            await _app.DisposeAsync();
-        }
-    }
 
     [Fact]
     public async Task CoverAndSpriteFromAuthenticatedUrl()
@@ -91,5 +52,44 @@ public class HttpSourceTests(ClipFixture clips) : IClassFixture<ClipFixture>
         Assert.Equal(ErrorCodes.GenerationFailed, ex.Code);
         Assert.False(File.Exists(tmp["cover.jpg"]));
         Assert.All(cove.Requests, r => Assert.False(r.Authorized));
+    }
+
+    [Fact]
+    public async Task CachedSourceGivesTheSameOutputsWithFewerRequests()
+    {
+        Ffmpeg.RequireOrSkip();
+        var size = new FileInfo(clips.Clip30).Length;
+        using var tmp = new TempDir();
+        var ctx = MediaContext.Default;
+
+        await using var direct = await FakeCove.StartAsync(clips.Clip30);
+        var directSource = MediaSource.ForCove(direct.Url, Token, size);
+        await CoverGenerator.GenerateAsync(ctx, directSource, 30, Specs.Cover(), tmp["d"], tmp["d.jpg"], Ct);
+        await SpriteGenerator.GenerateAsync(ctx, directSource, 30, Specs.Sprite("9_sprite.jpg"), tmp["d"], tmp["d_s.jpg"], tmp["d.vtt"], Ct);
+
+        await using var cove = await FakeCove.StartAsync(clips.Clip30);
+        await using var host = await CacheHost.StartAsync(1 << 30);
+        using (var cached = await host.Cache.OpenAsync(cove.Url, size, Ct))
+        {
+            var source = MediaSource.ForLocal(cached!.LocalUrl, size);
+            await CoverGenerator.GenerateAsync(ctx, source, 30, Specs.Cover(), tmp["c"], tmp["c.jpg"], Ct);
+            var afterCover = cached.Stats;
+            await SpriteGenerator.GenerateAsync(ctx, source, 30, Specs.Sprite("9_sprite.jpg"), tmp["c"], tmp["c_s.jpg"], tmp["c.vtt"], Ct);
+
+            var sprite = cached.Stats - afterCover;
+            Assert.Equal((1, 1), (afterCover.Misses, afterCover.Fetches));
+            Assert.Equal(0, sprite.Misses);
+            Assert.Equal(0, sprite.BytesFetched);
+            Assert.True(sprite.Hits > 0 && sprite.Reads > 0 && sprite.BytesServed > 0);
+        }
+
+        Assert.Equal(Outputs.Sha256File(tmp["d.jpg"]), Outputs.Sha256File(tmp["c.jpg"]));
+        Assert.Equal(Outputs.Sha256File(tmp["d_s.jpg"]), Outputs.Sha256File(tmp["c_s.jpg"]));
+        Assert.Equal(await File.ReadAllTextAsync(tmp["d.vtt"], Ct), await File.ReadAllTextAsync(tmp["c.vtt"], Ct));
+        Assert.All(cove.Requests, r => Assert.True(r.Authorized));
+        // The whole clip fits in one read-ahead run: one upstream request instead of one per ffmpeg input.
+        Assert.Single(cove.Requests);
+        Assert.True(direct.Requests.Count > 10, $"{direct.Requests.Count} direct requests");
+        Assert.Equal(0, host.Cache.CachedBytes);
     }
 }

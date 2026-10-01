@@ -85,6 +85,7 @@ public class PhashTests(ClipFixture clips) : IClassFixture<ClipFixture>
 
         Assert.Matches("^[0-9a-f]{1,16}$", first);
         Assert.Equal(first, second);
+        Assert.False(Directory.Exists(Path.Combine(dir.Path, "a", "frames")), "phash frames are deleted once loaded");
     }
 
     [Fact]

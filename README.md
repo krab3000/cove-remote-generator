@@ -138,10 +138,13 @@ Stop the worker with Ctrl+C. Tasks it was running are re-queued by Cove on anoth
 | `HL_LISTEN_URL` | – | Listen for Cove here, for example `http://0.0.0.0:8750`; Cove dials `ws://host:8750/rpc`. Set at least one of `HL_COVE_URL` and `HL_LISTEN_URL`, or both. |
 | `HL_WORKER_TOKEN` | generated | A fixed token, at least 16 characters. Without it, the worker generates one and keeps it in `HL_DATA_DIR/worker.token`. |
 | `HL_WORKER_NAME` | host name | Shown in Cove. |
-| `HL_DATA_DIR` | `./data` | Token and scratch. |
+| `HL_DATA_DIR` | `./data` | Token and scratch. A step's scratch files are deleted as soon as that step ends. |
 | `HL_MAX_CONCURRENCY` | `cpu/4` | Videos generated at once, shared by every Cove connected to the worker. Cove also caps this per worker. |
+| `HL_SOURCE_CACHE_MB` | `1024` | RAM for caching video bytes read from Cove, shared by all running videos. ffmpeg reads each video through a loopback endpoint in the worker, so its many seeks reuse one download of the header and of each byte range. `0` makes ffmpeg read from Cove directly. After each step the log shows the cache's hit rate and how much was read from Cove. |
 | `HL_H264_ENCODER` | `libx264` | Or `h264_nvenc`, `h264_qsv`, `h264_vaapi`, and so on. If a hardware encode fails, the worker falls back to libx264. |
-| `HL_FFMPEG_INPUT_ARGS` | – | Extra ffmpeg input arguments, for example hwaccel decode flags. |
+| `HL_HWACCEL` | – | Decode videos on the GPU with this ffmpeg hwaccel, for example `cuda` (NVIDIA), `d3d11va`, `qsv` or `vaapi`. It applies to every input of the cover, preview, sprite and phash commands. Frame-extraction batches shrink to 6 inputs to save video memory. A batch or step that fails with hardware decoding is retried in software. If ffmpeg doesn't list the hwaccel in `ffmpeg -hwaccels`, the worker decodes in software and logs a warning. Hardware-decoded phashes have not been checked against Cove's. |
+| `HL_HWACCEL_DEVICES` | – | Comma-separated hwaccel devices (GPU indexes for `cuda`, for example `0,1`). Tasks take them in turn. |
+| `HL_FFMPEG_INPUT_ARGS` | – | Extra ffmpeg arguments placed before the cover and preview inputs; they apply only to the first input of a command. For hardware decoding use `HL_HWACCEL`. |
 | `HL_FFMPEG`, `HL_FFPROBE` | `ffmpeg`, `ffprobe` | Paths to the binaries. |
 
 Networking notes:
