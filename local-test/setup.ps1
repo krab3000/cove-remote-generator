@@ -1,10 +1,10 @@
 <#
 .SYNOPSIS
-  Local end-to-end test bed: Cove + generation server(s) sharing one media folder, extension pre-installed.
+  Local end-to-end test bed: Cove + generation worker(s), extension pre-installed. Workers read videos from Cove over HTTP.
 
 .EXAMPLE
-  ./setup.ps1                 # build extension, install it, create sample videos, start, register server, scan
-  ./setup.ps1 -TwoServers     # same, plus a second generation server (distribution / failover testing)
+  ./setup.ps1                 # build extension, install it, create sample videos, start, register workers, scan
+  ./setup.ps1 -TwoServers     # same, plus worker-2, which Cove dials (distribution / failover testing)
   ./setup.ps1 -Large          # also fetch 1080p Big Buck Bunny + Sintel (~1.5 GB more)
   ./setup.ps1 reinstall       # rebuild the extension zip and hot-swap it into the running Cove
   ./setup.ps1 logs            # follow logs
@@ -14,7 +14,7 @@
 param(
     [ValidateSet("up", "reinstall", "logs", "down", "reset")]
     [string]$Command = "up",
-    [switch]$TwoServers,
+    [Alias("TwoWorkers")][switch]$TwoServers,
     [switch]$CoveFromSource,
     [switch]$SkipBuild,
     [switch]$Large,
@@ -76,12 +76,12 @@ function Install-Extension {
 }
 
 function Invoke-Ffmpeg([string]$media, [string[]]$ffmpegArgs) {
-    # Paths in $ffmpegArgs are relative to the media folder; use the host ffmpeg or borrow the server image's.
+    # Paths in $ffmpegArgs are relative to the media folder; use the host ffmpeg or borrow the worker image's.
     if (Get-Command ffmpeg -ErrorAction SilentlyContinue) {
         Push-Location $media
         try { & ffmpeg @ffmpegArgs } finally { Pop-Location }
     } else {
-        & docker run --rm --user root --entrypoint ffmpeg -v "${media}:/work" -w /work remote-heavylifter:local @ffmpegArgs
+        & docker run --rm --user root --entrypoint /usr/local/bin/ffmpeg -v "${media}:/work" -w /work remote-heavylifter-worker:local @ffmpegArgs
     }
     if ($LASTEXITCODE) { throw "ffmpeg failed: $ffmpegArgs" }
 }
@@ -145,7 +145,7 @@ function New-SampleMedia {
         Write-Host "    $($movie[0])"
     }
 
-    # Cut Big Buck Bunny into "episodes" (stream copy, instant) so there are enough videos to spread over servers.
+    # Cut Big Buck Bunny into "episodes" (stream copy, instant) so there are enough videos to spread over workers.
     $episodes = "Shows/Big Buck Bunny Chapters/Season 1"
     New-Item -ItemType Directory -Force (Join-Path $media $episodes) | Out-Null
     for ($i = 0; $i -lt 8; $i++) {
@@ -155,36 +155,50 @@ function New-SampleMedia {
     }
 }
 
-function Register-Servers($apiKey) {
+function Register-Workers($worker1Token, $worker2Token) {
     Step "Waiting for the extension's API"
     $loaded = @(Invoke-RestMethod "$cove/api/extensions") | Where-Object { $_.id -eq $extensionId }
     if (-not $loaded) {
         throw "Cove did not load $extensionId. It must be built against a Cove.Sdk no newer than the running Cove; see ./setup.ps1 logs"
     }
-    Wait-Http "$api/servers" "The remote-heavylifter extension" 120 -Json
+    Wait-Http "$api/workers" "The remote-heavylifter extension" 120 -Json
 
-    $existing = Invoke-RestMethod "$api/servers"
-    $servers = @($existing | ForEach-Object {
-        @{ id = $_.id; name = $_.name; baseUrl = $_.baseUrl; apiKey = $null; enabled = $_.enabled;
-           maxConcurrency = $_.maxConcurrency; mappings = @($_.mappings) }
+    # Workers reach Cove on Docker's network by its service name.
+    $settings = @{ coveUrlForWorkers = "http://cove:5073"; coveAuthEnabled = $false } | ConvertTo-Json
+    Invoke-RestMethod -Method Put -Uri "$api/settings" -ContentType "application/json" -Body $settings | Out-Null
+
+    $existing = Invoke-RestMethod "$api/workers"
+    $workers = @($existing | ForEach-Object {
+        @{ id = $_.id; name = $_.name; token = $null; url = $_.url; coveUrlOverride = $_.coveUrlOverride;
+           enabled = $_.enabled; maxConcurrency = $_.maxConcurrency }
     })
-    $wanted = @(@{ name = "local-1"; baseUrl = "http://heavylifter:8750"; remote = "/mnt/media" })
-    if ($TwoServers) { $wanted += @{ name = "local-2"; baseUrl = "http://heavylifter-2:8750"; remote = "/data/library" } }
+    $wanted = @(@{ name = "worker-1"; token = $worker1Token; url = $null })
+    if ($TwoServers) { $wanted += @{ name = "worker-2"; token = $worker2Token; url = "ws://worker-2:8750/rpc" } }
 
     $added = @()
     foreach ($w in $wanted) {
-        if ($servers | Where-Object { $_.name -eq $w.name }) { continue }
-        $servers += @{ id = $null; name = $w.name; baseUrl = $w.baseUrl; apiKey = $apiKey; enabled = $true; maxConcurrency = 2;
-                       mappings = @(@{ covePrefix = "/media"; remotePrefix = $w.remote }) }
+        if ($workers | Where-Object { $_.name -eq $w.name }) { continue }
+        $workers += @{ id = $null; name = $w.name; token = $w.token; url = $w.url; coveUrlOverride = $null; enabled = $true; maxConcurrency = 2 }
         $added += $w.name
     }
-    if ($added.Count -eq 0) { Step "Generation servers already registered"; return }
+    if ($added.Count -gt 0) {
+        Step "Registering generation worker(s): $($added -join ', ')"
+        $body = ConvertTo-Json -InputObject @($workers) -Depth 6
+        Invoke-RestMethod -Method Put -Uri "$api/workers" -ContentType "application/json" -Body $body | Out-Null
+    } else {
+        Step "Generation workers already registered"
+    }
 
-    Step "Registering generation server(s): $($added -join ', ')"
-    $body = ConvertTo-Json -InputObject @($servers) -Depth 6
-    Invoke-RestMethod -Method Put -Uri "$api/servers" -ContentType "application/json" -Body $body | Out-Null
-    $health = Invoke-RestMethod "$api/servers/health?refresh=true"
-    $health | ForEach-Object { Write-Host ("    {0,-8} {1}{2}" -f $_.name, $_.state, $(if ($_.error) { " - $($_.error)" } else { "" })) }
+    Step "Waiting for the workers to connect"
+    $deadline = (Get-Date).AddSeconds(90)
+    do {
+        $health = @(Invoke-RestMethod "$api/workers/health?refresh=true")
+        if (-not ($health | Where-Object { $_.state -ne "live" })) { break }
+        Start-Sleep -Seconds 3
+    } while ((Get-Date) -lt $deadline)
+    $health | ForEach-Object {
+        Write-Host ("    {0,-9} {1,-12} {2}{3}" -f $_.name, $_.state, $_.connection, $(if ($_.error) { " - $($_.error)" } else { "" }))
+    }
 }
 
 function Complete-CoveSetup {
@@ -236,26 +250,39 @@ foreach ($dir in @("media", "cove/config/extensions", "cove/generated", "cove/ba
     New-Item -ItemType Directory -Force (Join-Path $data $dir) | Out-Null
 }
 
-if (-not (Test-Path $envFile)) {
-    $bytes = [byte[]]::new(24); [Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
-    $key = [Convert]::ToHexStringLower($bytes)
-    Set-Content -Path $envFile -Value @("HL_API_KEY=$key", "COVE_PORT=$CovePort") -Encoding ascii
+function New-Token {
+    $bytes = [byte[]]::new(32); [Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+    return [Convert]::ToBase64String($bytes).TrimEnd("=").Replace("+", "-").Replace("/", "_")
 }
-$apiKey = ((Get-Content $envFile | Where-Object { $_ -like "HL_API_KEY=*" }) -split "=", 2)[1]
+function Get-EnvValue($name) {
+    $line = Get-Content $envFile | Where-Object { $_ -like "$name=*" } | Select-Object -First 1
+    if ($line) { return ($line -split "=", 2)[1] } else { return $null }
+}
+if (-not (Test-Path $envFile)) { Set-Content -Path $envFile -Value @("COVE_PORT=$CovePort") -Encoding ascii }
+foreach ($name in @("WORKER1_TOKEN", "WORKER2_TOKEN")) {
+    if (-not (Get-EnvValue $name)) { Add-Content -Path $envFile -Value "$name=$(New-Token)" -Encoding ascii }
+}
+$worker1Token = Get-EnvValue "WORKER1_TOKEN"
+$worker2Token = Get-EnvValue "WORKER2_TOKEN"
 
 $zip = Install-Extension
 
-Step "Building the generation server image"
-Compose build heavylifter
+Step "Building the generation worker image"
+Compose build worker-1
 New-SampleMedia
 
-Step "Starting Cove and the generation server(s)"
-Compose up -d
+Step "Starting Cove and the generation worker(s)"
+$coveWasRunning = Compose ps --status running -q cove 2>$null
+Compose up -d --remove-orphans
+if ($coveWasRunning) {
+    Step "Restarting Cove to load the freshly installed extension"
+    Compose restart cove
+}
 Step "Waiting for Cove (the first start runs database migrations; this can take a few minutes)"
 Wait-Http "$cove/health" "Cove" 600
 
 Complete-CoveSetup
-Register-Servers $apiKey
+Register-Workers $worker1Token $worker2Token
 
 Step "Scanning the sample library"
 try {
@@ -269,8 +296,8 @@ Write-Host "Ready." -ForegroundColor Green
 Write-Host "  Cove:                $cove   (owner: $ownerUser / $ownerPassword; auth is off for local requests)"
 Write-Host "  Remote Generation:   $cove/settings/remote-generation"
 Write-Host "  Extension zip:       $zip"
-Write-Host "  Generation server:   http://127.0.0.1:8750  (API key in local-test/.env)"
-Write-Host "  Sample media:        $(Join-Path $data 'media')   (Cove: /media, server: /mnt/media)"
+Write-Host "  Workers:             worker-1 dials Cove; worker-2 (-TwoServers) is dialed by Cove (tokens in local-test/.env)"
+Write-Host "  Sample media:        $(Join-Path $data 'media')   (Cove: /media; workers read it from Cove over HTTP)"
 Write-Host "  Generated files:     $(Join-Path $data 'cove/generated')"
 Write-Host ""
 Write-Host "Wait for the scan to finish (Jobs drawer), then Settings -> Remote Generation -> Generate -> Run."

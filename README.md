@@ -1,26 +1,37 @@
 # remote-heavylifter
 
-This project moves Cove's heaviest per-video work onto other machines. Generating **covers, preview clips and sprite sheets (with their VTT)** runs on one or more remote *generation servers*, and Cove puts the results in its own `generated` folder.
+This project moves Cove's heaviest per-video work onto other machines. Generating **covers, preview clips and sprite sheets (with their VTT)** runs on one or more remote *generation workers*, and Cove puts the results in its own `generated` folder.
 
-It has two parts:
+It has three parts:
 
 | Part | Path | What it is |
 |---|---|---|
-| Generation server | [server/](server/) | A Python + FastAPI + ffmpeg service. It generates the artifacts for a video it can read from its own copy of the media library. |
-| Cove extension | [extension/](extension/) | A C# backend and a React settings UI. It adds a **Remote Generation** settings tab (server list with path mappings, and a Generate panel), a job that appears in Cove's Jobs drawer, and a "Remote generate" entry in Cove's task list. |
+| Worker | [worker/](worker/) | A .NET service that runs ffmpeg. It reads each video from Cove over HTTP and uploads the results back, so it needs no access to the media library. |
+| Cove extension | [extension/](extension/) | A C# backend and a React settings UI. It adds a **Remote Generation** settings tab (workers, pending workers, and a Generate panel), a job in Cove's Jobs drawer, and a "Remote generate" entry in Cove's task list. |
+| Protocol | [protocol/](protocol/) | The JSON-RPC messages and constants shared by the two. |
 
 ```
- Cove (extension)                                   generation server(s)
- ───────────────                                    ────────────────────
- select videos (folder tree, overwrite rules)
- map each file path per server  ── POST /v1/tasks ─▶ ffmpeg: cover / preview / sprite+vtt
- poll                           ── GET  /v1/tasks/…
- download + sha256 check        ◀─ GET  …/artifacts/{kind}
+ Cove + extension                                         worker
+ ────────────────                                         ──────
+ one WebSocket per worker, JSON-RPC (StreamJsonRpc) ◀────▶ either side may dial:
+   worker has a URL  → Cove dials ws(s)://worker:8750/rpc
+   no URL            → worker dials wss://cove/api/ext/com.cove.remote-heavylifter/worker/ws
+ submit(task)  ────────────────────────────────────────▶ ffmpeg/ffprobe read the source URL directly
+ GET/HEAD …/worker/tasks/{task}/source  ◀──────────────── (Range requests, X-Heavylifter-Token header)
+ PUT …/worker/tasks/{task}/artifacts/{kind} ◀──────────── upload, size + sha256 checked
+ taskFinished  ◀──────────────────────────────────────── 
  atomic move into generated/…
- clean up                       ── DELETE /v1/tasks/…
 ```
 
-Cove always **pulls**, so the servers never need a network route back to Cove. Each server must see the same media files as Cove, possibly under a different path. Per-server path mappings translate between the two.
+### Auth
+
+- **One token per worker.** Each worker has a single token, set with `HL_WORKER_TOKEN` or generated on first start and saved in its data folder. The worker prints a short **worker ID** derived from it, so the token itself never has to be shown.
+- **The same token works in both directions:**
+  - when Cove dials the worker, Cove presents the token and the worker checks it;
+  - when the worker dials Cove, it presents the token and Cove looks it up among its workers.
+- **Unknown tokens wait for approval.** A worker that dials in with a token Cove doesn't know appears under **Pending workers** until you **Trust** it.
+- **Worker HTTP access is narrow.** The worker endpoints skip Cove's own auth (a worker is not a Cove user) and accept only a trusted worker token. Even then, a worker can only read the source and upload the artifacts of a task currently assigned to it. It never holds a Cove API token.
+- **Token storage in Cove.** Cove keeps the plain token only for workers it dials. For workers that dial in, it keeps only a hash.
 
 ## Output parity with Cove
 
@@ -43,38 +54,43 @@ Cove always **pulls**, so the servers never need a network route back to Cove. E
   - VR videos get Cove's one-eye flat reprojection.
 - **Parity pinning.** Expected values derived from Cove's source live in [contract/parity/cove-parity.json](contract/parity/cove-parity.json) and are checked by both test suites.
 
-## Running a generation server
+## Running a worker
 
-With Docker (recommended; the image bundles the same BtbN ffmpeg builds Cove uses):
-
-```sh
-cd server
-HL_API_KEYS=$(openssl rand -hex 24) docker compose -f docker-compose.example.yml up -d --build
-```
-
-Edit the volume in `docker-compose.example.yml` so that your library is mounted **read-only** at `/mnt/media`.
-
-Without Docker (needs Python 3.12+, and ffmpeg/ffprobe on `PATH`):
+With Docker (recommended; the image bundles the same BtbN ffmpeg builds Cove uses). From the repository root:
 
 ```sh
-cd server
-python -m venv .venv && .venv/bin/pip install .
-HL_API_KEYS=secret HL_MEDIA_ROOTS=/mnt/media .venv/bin/heavylifter
+docker build -f worker/Dockerfile -t remote-heavylifter-worker .
+
+# The worker connects to Cove (works behind NAT; nothing listens):
+docker run -d --name hl-worker -v hl-worker-data:/var/lib/heavylifter \
+  -e HL_COVE_URL=http://192.168.1.10:5073 -e HL_WORKER_NAME=gpu-box remote-heavylifter-worker
+
+# Or Cove connects to the worker:
+docker run -d --name hl-worker -p 8750:8750 -v hl-worker-data:/var/lib/heavylifter \
+  -e HL_LISTEN_URL=http://0.0.0.0:8750 -e HL_WORKER_NAME=gpu-box remote-heavylifter-worker
 ```
+
+Keep the data volume: it holds the worker's token, which is its identity.
+
+Without Docker, `scripts/package-worker.sh` builds self-contained binaries (`linux-x64`, `linux-arm64`, `osx-arm64`, `win-x64`). Install ffmpeg/ffprobe separately, or point `HL_FFMPEG` / `HL_FFPROBE` at them.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `HL_API_KEYS` | required | Comma-separated bearer keys. The server refuses to start without one unless `HL_ALLOW_NO_AUTH=true`. |
-| `HL_MEDIA_ROOTS` | required | Comma-separated folders the server may read. Task paths outside them are rejected, after symlinks and `..` are resolved. |
-| `HL_PORT` / `HL_HOST` | `8750` / `0.0.0.0` | Listen address. |
-| `HL_MAX_CONCURRENCY` | `cpu/4` | Videos generated at once. Cove also caps this per server. |
-| `HL_WORK_DIR` | `./work` | Scratch and finished artifacts, until Cove collects them. |
-| `HL_ARTIFACT_TTL_HOURS` | `6` | Uncollected artifacts are deleted after this long. |
-| `HL_H264_ENCODER` | `libx264` | Or `h264_nvenc`, `h264_qsv`, `h264_vaapi`, and so on. If a hardware encode fails, the server falls back to libx264. |
+| `HL_COVE_URL` | – | Dial Cove at this `http(s)://` address. |
+| `HL_LISTEN_URL` | – | Listen for Cove here, for example `http://0.0.0.0:8750`; Cove dials `ws://host:8750/rpc`. Set at least one of `HL_COVE_URL` and `HL_LISTEN_URL`, or both. |
+| `HL_WORKER_TOKEN` | generated | A fixed token, at least 16 characters. Without it, the worker generates one and keeps it in `HL_DATA_DIR/worker.token`. |
+| `HL_WORKER_NAME` | host name | Shown in Cove. |
+| `HL_DATA_DIR` | `./data` | Token and scratch. |
+| `HL_MAX_CONCURRENCY` | `cpu/4` | Videos generated at once, shared by every Cove connected to the worker. Cove also caps this per worker. |
+| `HL_H264_ENCODER` | `libx264` | Or `h264_nvenc`, `h264_qsv`, `h264_vaapi`, and so on. If a hardware encode fails, the worker falls back to libx264. |
 | `HL_FFMPEG_INPUT_ARGS` | – | Extra ffmpeg input arguments, for example hwaccel decode flags. |
-| `HL_MAX_QUEUE`, `HL_MIN_FREE_GB` | `2000`, `2` | Back-pressure: a full queue gets HTTP 429, and a disk below the free-space limit gets HTTP 507. |
+| `HL_FFMPEG`, `HL_FFPROBE` | `ffmpeg`, `ffprobe` | Paths to the binaries. |
 
-Put a TLS reverse proxy in front of the server if it is reachable outside a trusted LAN.
+Networking notes:
+
+- **The worker always needs HTTP access to Cove,** even when Cove dials the worker: it reads videos and uploads results through Cove. Set **Cove URL for workers** in the extension to an address the workers can reach. A worker that dialed in uses the address it dialed unless that setting, or its own override, is set.
+- **Cove's auth-off lockdown.** If Cove's sign-in is off, Cove only trusts requests from local network addresses that also use a local host name (or one listed in `Auth.TrustedHosts`). A worker request from anywhere else makes Cove switch sign-in on to protect itself. Workers on other networks therefore need Cove's sign-in turned on.
+- **Reverse proxies.** A proxy in front of Cove (or the worker) must pass WebSocket upgrades (`Upgrade` / `Connection` headers) and allow long-lived connections. Its upload size limit must allow previews of several MB.
 
 ## Installing the extension
 
@@ -84,49 +100,42 @@ pwsh scripts/package.ps1          # or scripts/package.sh
 
 This produces `artifacts/remote-heavylifter-<version>.zip`. Install it in Cove from **Settings → Extensions → Install from ZIP** (requires Cove ≥ 1.5.0). Then:
 
-1. Open **Settings → Remote Generation → Generation servers**.
-2. Add each server with its URL, API key, and a mapping for every Cove library folder, for example `D:/media → /mnt/media`.
-3. Press **Test**. It connects to the server, then checks a few real video paths through each mapping.
+1. Open **Settings → Remote Generation** and set **Cove URL for workers**.
+2. Add workers. Either way, the worker's card shows its connection, worker ID and status:
+   - **A worker that dials Cove:** start it with `HL_COVE_URL`. It appears under **Pending workers** with the ID it printed. Check the ID matches, then press **Trust**. You can also add it up front: paste its token and leave the URL empty.
+   - **A worker Cove dials:** add it with its `ws://…/rpc` URL and its token.
+3. Press **Test** on a worker. It checks the connection, then has the worker read a real video from Cove.
 4. In **Generate**:
-   - pick artifacts, the live servers to use, optional folders, and whether to overwrite;
+   - pick artifacts, the live workers to use, optional folders, and whether to overwrite;
    - press **Run**.
-
-   Only live servers can be selected. If none are reachable, the job refuses to start: the Run button is disabled and the API answers 409 `NO_LIVE_SERVERS`.
 5. Follow progress in Cove's Jobs drawer, which shows one unit per video.
 
 During a run:
 
-- Each server works on up to *min(its max parallel videos, its reported capacity)* videos at once.
-- A server that keeps failing is taken out of the run. Its videos move to the other servers, and it rejoins if it recovers.
-- If a server cannot find a file, that video is retried on another server.
-- Cancelling the job deletes the in-flight remote tasks.
+- Each worker works on up to *min(its max parallel videos, its reported capacity)* videos at once.
+- A worker that disconnects, or keeps failing, is taken out of the run. Its videos move to the other workers, and it rejoins when it reconnects.
+- Cancelling the job cancels the in-flight tasks and revokes their access.
 
 Permissions:
 
-- Managing servers requires `extensions.configure`.
+- Managing workers requires `extensions.configure`.
 - Starting a run requires both `jobs.run` and `extensions.configure`.
-- Viewing server status requires either one.
+- Viewing worker status requires either one.
 
 ## Development
 
 ```sh
-# server
-cd server && python -m venv .venv && .venv/Scripts/pip install -e ".[dev]" && .venv/Scripts/python -m pytest
-python scripts/export-openapi.py        # after changing the API: refresh contract/openapi.json
-
-# extension (builds against the sibling ../cove checkout when present, else the Cove.Sdk NuGet package)
-cd extension && dotnet test RemoteHeavylifter.slnx
+dotnet test RemoteHeavylifter.slnx      # extension + worker tests (worker ffmpeg tests run when ffmpeg is on PATH)
 cd extension/frontend && npm ci && npm run typecheck && npm run build
-
-python scripts/check-versions.py        # VERSION must match every component
+python scripts/check-versions.py        # VERSION must match the extension manifest and frontend package
 ```
 
-- The ffmpeg integration tests in `server/tests` run when `ffmpeg` and `ffprobe` are on `PATH`.
-- `LiveServerTests` in the extension exercises a real server when `HL_IT_URL`, `HL_IT_KEY`, `HL_IT_MEDIA_ROOT` and `HL_IT_CLIP` are set.
+The extension builds against the published Cove.Sdk NuGet package by default; pass `-p:UseLocalCoveSdk=true` to build against the sibling `../cove` checkout. For an end-to-end run with Cove and two workers, see [local-test/](local-test/).
 
 ## Known limitations
 
 - **Duplicated Cove internals.** The generated-file layout and ffmpeg arguments are copies of private Cove code, pinned by the parity fixtures to Cove commit `f4cd955e`. Re-check them when Cove changes its generator.
 - **No shared lock with Cove.** Cove's per-video generation lock is not available to extensions. Don't run Cove's own Generate task over the same videos at the same time. Commits are atomic renames, but the last writer wins.
 - **Out of scope:** segment thumbnails and previews, stereo VR cards and previews, and phash/MD5.
-- **API keys** are stored in Cove's extension data table. They are never returned to the browser, but they are not encrypted at rest.
+- **Worker tokens** of workers Cove dials are stored in Cove's extension data table. They are never returned to the browser, but they are not encrypted at rest. Workers that dial in are stored as a hash only.
+- **Tokens on the worker's command line.** ffmpeg receives the worker token as a `-headers` argument, so it is visible in the worker machine's process list.

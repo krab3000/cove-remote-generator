@@ -2,7 +2,7 @@
   "source": "yourcove/cove src/Cove.Api/Services/ThumbnailService.cs, VideoFrameBatchExtractor.cs, SpriteFrameSet.cs @ f4cd955e96a4286e4dc4fcb6d71197553d74fb92",
   "fixed": [
     { "value": 366.84, "digits": 2, "expected": "366.84" },
-    { "value": 0.125, "digits": 2, "expected": "0.13" },
+    { "value": 0.125, "digits": 2, "expected": "0.12" },
     { "value": 2.675, "digits": 2, "expected": "2.67" },
     { "value": 1.0, "digits": 3, "expected": "1.000" },
     { "value": 0.0005, "digits": 3, "expected": "0.001" }

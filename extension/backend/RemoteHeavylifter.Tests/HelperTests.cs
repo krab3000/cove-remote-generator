@@ -1,7 +1,7 @@
 using System.Text.Json;
-using RemoteHeavylifter.Contract;
 using RemoteHeavylifter.Generation;
-using RemoteHeavylifter.Servers;
+using RemoteHeavylifter.Protocol;
+using RemoteHeavylifter.Workers;
 
 namespace RemoteHeavylifter.Tests;
 
@@ -28,31 +28,6 @@ public sealed class GeneratedPathsTests
         Assert.Equal(Path.Combine("g", "vtt", "e8", "42_thumbs.vtt"), paths.SpriteVtt(42));
         Assert.Equal(Path.Combine("g", "tmp", "remote-heavylifter"), paths.TempRoot);
     }
-}
-
-public sealed class PathMapperTests
-{
-    private static readonly PathMapping[] Mappings =
-    [
-        new("D:\\media", "/mnt/media"),
-        new("D:/media/Movies", "/mnt/movies/"),
-        new("/srv/library", "\\\\nas\\library"),
-    ];
-
-    [Theory]
-    [InlineData("D:/media/Shows/A.mkv", "/mnt/media/Shows/A.mkv")]
-    [InlineData("d:/MEDIA/Shows/Case.MKV", "/mnt/media/Shows/Case.MKV")]
-    [InlineData("D:/media/Movies/B.mp4", "/mnt/movies/B.mp4")]
-    [InlineData("D:\\media\\Movies\\sub\\C.mp4", "/mnt/movies/sub/C.mp4")]
-    [InlineData("/srv/library/x/y.mp4", "\\\\nas\\library\\x\\y.mp4")]
-    [InlineData("D:/media2/Z.mp4", null)]
-    [InlineData("E:/other/Z.mp4", null)]
-    public void Maps_through_the_longest_whole_segment_prefix(string covePath, string? expected)
-        => Assert.Equal(expected, PathMapper.Map(covePath, Mappings));
-
-    [Fact]
-    public void A_root_prefix_maps_everything()
-        => Assert.Equal("/mnt/x/a.mp4", PathMapper.Map("/x/a.mp4", [new PathMapping("/", "/mnt")]));
 }
 
 public sealed class PathFilterTests
@@ -187,73 +162,184 @@ public sealed class ArtifactCommitterTests : IDisposable
     }
 }
 
-public sealed class ServerRegistryTests
+public sealed class WorkerRegistryTests
 {
-    private static readonly ServerDefinition Stored = new()
+    private const string Token = "worker-token-0123456789abcdef";
+
+    private static readonly WorkerDefinition Dialed = new()
     {
         Id = Guid.Parse("11111111-1111-1111-1111-111111111111"),
         Name = "gpu-box",
-        BaseUrl = "http://gpu:8750",
-        ApiKey = "super-secret-key",
+        Url = "ws://gpu:8750/rpc",
+        Token = Token,
+        TokenHash = WorkerTokens.Hash(Token),
     };
 
     [Fact]
-    public void A_missing_key_keeps_the_stored_one_and_views_mask_it()
+    public void The_connection_direction_follows_from_the_url()
     {
-        var (servers, errors) = ServerRegistry.Merge(
-            [new ServerInput(Stored.Id, "gpu-box", "http://gpu:8750/", null, true, 4, [new PathMapping("D:/media", "/mnt/media")])],
-            [Stored]);
+        Assert.Equal(WorkerConnections.CoveDials, Dialed.Connection);
+        Assert.Equal(WorkerConnections.WorkerDials, (Dialed with { Url = null }).Connection);
+    }
+
+    [Fact]
+    public void A_missing_token_keeps_the_stored_one_and_views_mask_it()
+    {
+        var (workers, errors) = WorkerRegistry.Merge(
+            [new WorkerInput(Dialed.Id, "gpu-box", null, "ws://gpu:8750/rpc/", null, true, 4)],
+            [Dialed]);
         Assert.Empty(errors);
-        Assert.Equal("super-secret-key", servers[0].ApiKey);
-        Assert.Equal("http://gpu:8750", servers[0].BaseUrl);
-        var view = ServerView.From(servers[0]);
-        Assert.True(view.HasApiKey);
-        Assert.Equal("…-key", view.ApiKeyHint);
-        Assert.DoesNotContain("secret", JsonSerializer.Serialize(view));
+        Assert.Equal(Token, workers[0].Token);
+        Assert.Equal("ws://gpu:8750/rpc", workers[0].Url);
+        var view = WorkerView.From(workers[0]);
+        Assert.True(view.HasToken);
+        Assert.Equal("…cdef", view.TokenHint);
+        Assert.Equal(WorkerTokens.Id(Token), view.WorkerTokenId);
+        Assert.DoesNotContain("0123456789", JsonSerializer.Serialize(view));
+    }
+
+    [Fact]
+    public void Without_a_url_only_the_hash_is_kept()
+    {
+        var (workers, errors) = WorkerRegistry.Merge([new WorkerInput(null, "laptop", Token, null, null)], []);
+        Assert.Empty(errors);
+        Assert.Null(workers[0].Token);
+        Assert.Equal(WorkerTokens.Hash(Token), workers[0].TokenHash);
+        Assert.Equal(WorkerConnections.WorkerDials, workers[0].Connection);
+    }
+
+    [Fact]
+    public void Adding_a_url_to_a_hash_only_worker_needs_the_token_again()
+    {
+        var trusted = Dialed with { Url = null, Token = null };
+        var (_, errors) = WorkerRegistry.Merge([new WorkerInput(trusted.Id, "gpu-box", null, "ws://gpu:8750/rpc", null)], [trusted]);
+        Assert.Contains(errors, e => e.Contains("needs the worker token"));
     }
 
     [Fact]
     public void Invalid_input_is_reported()
     {
-        var (_, errors) = ServerRegistry.Merge(
+        var (_, errors) = WorkerRegistry.Merge(
         [
-            new ServerInput(null, "", "ftp://x", "", true, 0, [new PathMapping("", "/x")]),
-            new ServerInput(null, "a", "http://a", "k", true, 1),
-            new ServerInput(null, "A", "http://b", "k", true, 1),
+            new WorkerInput(null, "", null, "http://x", "ftp://cove", true, 0),
+            new WorkerInput(null, "a", "short", null, null),
+            new WorkerInput(null, "b", Token, null, null),
+            new WorkerInput(null, "B", Token + "x", null, null),
+            new WorkerInput(null, "c", Token, null, null),
         ], []);
         Assert.Contains(errors, e => e.Contains("name is required"));
-        Assert.Contains(errors, e => e.Contains("http://"));
-        Assert.Contains(errors, e => e.Contains("API key"));
-        Assert.Contains(errors, e => e.Contains("max concurrency"));
-        Assert.Contains(errors, e => e.Contains("path mapping"));
-        Assert.Contains(errors, e => e.Contains("more than one server"));
+        Assert.Contains(errors, e => e.Contains("token is required"));
+        Assert.Contains(errors, e => e.Contains("ws:// or wss://"));
+        Assert.Contains(errors, e => e.Contains("Cove URL override"));
+        Assert.Contains(errors, e => e.Contains("max parallel"));
+        Assert.Contains(errors, e => e.Contains("at least 16 characters"));
+        Assert.Contains(errors, e => e.Contains("more than one worker"));
+        Assert.Contains(errors, e => e.Contains("already uses this token"));
     }
 }
 
-public sealed class ContractTests
+public sealed class WorkerTokensTests
 {
-    private static string Fixture(string name)
-        => File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "contract", "fixtures", name));
+    [Fact]
+    public void Generated_tokens_are_long_and_distinct()
+    {
+        var a = WorkerTokens.Generate();
+        Assert.True(a.Length >= 40);
+        Assert.NotEqual(a, WorkerTokens.Generate());
+    }
 
     [Fact]
-    public void Fixtures_round_trip()
+    public void The_id_is_derived_from_the_hash()
     {
-        var status = JsonSerializer.Deserialize<RemoteTaskStatus>(Fixture("task_status.json"), RemoteJson.Options)!;
-        Assert.Equal("partial", status.Status);
-        Assert.True(status.IsTerminal);
-        Assert.True(status.Artifacts["cover"].Succeeded);
-        Assert.Equal("preview: Invalid data found when processing input", status.Artifacts["preview"].Error);
+        var token = WorkerTokens.Generate();
+        Assert.Equal(WorkerTokens.IdLength, WorkerTokens.Id(token).Length);
+        Assert.Equal(WorkerTokens.Id(token), WorkerTokens.IdFromHash(WorkerTokens.Hash(token)));
+        Assert.Matches("^[A-Z2-7]+$", WorkerTokens.Id(token));
+        Assert.True(WorkerTokens.Matches(token, WorkerTokens.Hash(token)));
+        Assert.False(WorkerTokens.Matches(token + "x", WorkerTokens.Hash(token)));
+    }
+}
 
-        var info = JsonSerializer.Deserialize<RemoteInfo>(Fixture("info.json"), RemoteJson.Options)!;
-        Assert.Equal(RemoteJson.ApiVersion, info.ApiVersion);
-        Assert.Equal(4, info.Capacity);
+public sealed class WorkerAccessTests
+{
+    private const string TokenA = "token-for-worker-a-0123456789";
+    private const string TokenB = "token-for-worker-b-0123456789";
 
-        var request = JsonSerializer.Deserialize<RemoteTaskRequest>(Fixture("task_request.json"), RemoteJson.Options)!;
-        var json = JsonSerializer.Serialize(request, RemoteJson.Options);
-        using var expected = JsonDocument.Parse(Fixture("task_request.json"));
-        using var actual = JsonDocument.Parse(json);
-        foreach (var property in expected.RootElement.EnumerateObject().Where(p => p.Value.ValueKind != JsonValueKind.Null))
-            Assert.True(actual.RootElement.TryGetProperty(property.Name, out _), $"missing {property.Name}");
-        Assert.Equal("123_sprite.jpg", actual.RootElement.GetProperty("sprite").GetProperty("sprite_filename").GetString());
+    private static async Task<(WorkerAccess Access, WorkerDefinition A, WorkerDefinition B)> CreateAsync(bool bEnabled = true)
+    {
+        var store = new StoreHolder();
+        store.Set(new MemoryStore());
+        var registry = new WorkerRegistry(store);
+        var (workers, errors) = await registry.ReplaceAsync(
+        [
+            new WorkerInput(null, "a", TokenA, null, null),
+            new WorkerInput(null, "b", TokenB, null, null, bEnabled),
+        ]);
+        Assert.Empty(errors);
+        return (new WorkerAccess(registry), workers[0], workers[1]);
+    }
+
+    [Fact]
+    public async Task A_worker_may_only_touch_its_own_tasks_and_requested_kinds()
+    {
+        var (access, a, _) = await CreateAsync();
+        access.Register(new TaskAssignment("t1", a.Id, "/media/x.mp4", [ArtifactKinds.Cover], "/tmp/t1"));
+
+        Assert.Equal(AccessDecision.Allowed, access.Authorize(TokenA, "t1", null).Decision);
+        Assert.Equal(AccessDecision.Allowed, access.Authorize(TokenA, "t1", ArtifactKinds.Cover).Decision);
+        Assert.Equal(AccessDecision.Forbidden, access.Authorize(TokenA, "t1", ArtifactKinds.Preview).Decision);
+        Assert.Equal(AccessDecision.Forbidden, access.Authorize(TokenB, "t1", null).Decision);
+        Assert.Equal(AccessDecision.Forbidden, access.Authorize(TokenA, "other", null).Decision);
+        Assert.Equal(AccessDecision.Unauthorized, access.Authorize(null, "t1", null).Decision);
+        Assert.Equal(AccessDecision.Unauthorized, access.Authorize("not-a-worker-token-at-all", "t1", null).Decision);
+
+        access.Remove("t1");
+        Assert.Equal(AccessDecision.Forbidden, access.Authorize(TokenA, "t1", null).Decision);
+    }
+
+    [Fact]
+    public async Task A_disabled_worker_is_not_authorized()
+    {
+        var (access, _, b) = await CreateAsync(bEnabled: false);
+        access.Register(new TaskAssignment("t1", b.Id, "/media/x.mp4", [], "/tmp/t1"));
+        Assert.Equal(AccessDecision.Unauthorized, access.Authorize(TokenB, "t1", null).Decision);
+    }
+
+    private sealed class MemoryStore : Cove.Plugins.IExtensionStore
+    {
+        private readonly Dictionary<string, string> _values = [];
+
+        public Task<string?> GetAsync(string key, CancellationToken ct = default)
+            => Task.FromResult(_values.TryGetValue(key, out var value) ? value : null);
+
+        public Task SetAsync(string key, string value, CancellationToken ct = default)
+        {
+            _values[key] = value;
+            return Task.CompletedTask;
+        }
+
+        public Task DeleteAsync(string key, CancellationToken ct = default)
+        {
+            _values.Remove(key);
+            return Task.CompletedTask;
+        }
+
+        public Task<Dictionary<string, string>> GetAllAsync(CancellationToken ct = default)
+            => Task.FromResult(new Dictionary<string, string>(_values));
+    }
+}
+
+public sealed class ProtocolJsonTests
+{
+    [Fact]
+    public void Task_messages_round_trip_in_camel_case()
+    {
+        var request = new TaskRequest("t1", 7, "http://cove/source", 123, 60, new Dictionary<string, string> { ["cover"] = "http://cove/a" },
+            new CoverSpec(12, null), null, new SpriteSpec(81, 320, null, "7_sprite.jpg"));
+        var json = JsonSerializer.Serialize(request, RpcChannel.JsonOptions);
+        Assert.Contains("\"sourceUrl\"", json);
+        Assert.Contains("\"spriteFilename\":\"7_sprite.jpg\"", json);
+        Assert.DoesNotContain("\"preview\"", json);
+        Assert.Equal(request.Sprite, JsonSerializer.Deserialize<TaskRequest>(json, RpcChannel.JsonOptions)!.Sprite);
     }
 }

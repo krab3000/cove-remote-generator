@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Local end-to-end test bed: Cove + generation server(s) sharing one media folder, extension pre-installed.
+# Local end-to-end test bed: Cove + generation worker(s), extension pre-installed. Workers read videos from Cove over HTTP.
 #
-#   ./setup.sh [up]            build extension, install it, create sample videos, start, register server, scan
-#   ./setup.sh up --two-servers
+#   ./setup.sh [up]            build extension, install it, create sample videos, start, register workers, scan
+#   ./setup.sh up --two-servers   (alias --two-workers): adds worker-2, which Cove dials
 #   ./setup.sh reinstall       rebuild the extension zip and hot-swap it into the running Cove
 #   ./setup.sh logs | down
 #   ./setup.sh reset           delete ALL local test data
 #
-# Options: --two-servers  --cove-from-source  --skip-build  --large (adds 1080p BBB + Sintel, ~1.5 GB)
+# Options: --two-servers|--two-workers  --cove-from-source  --skip-build  --large (adds 1080p BBB + Sintel, ~1.5 GB)
 # Needs: docker, python3 (and node/npm + dotnet unless --skip-build).
 set -euo pipefail
 
@@ -32,7 +32,7 @@ large=0
 for arg in "$@"; do
   case "$arg" in
     up|reinstall|logs|down|reset) command=$arg ;;
-    --two-servers) two_servers=1 ;;
+    --two-servers|--two-workers) two_servers=1 ;;
     --large) large=1 ;;
     --cove-from-source) from_source=1 ;;
     --skip-build) skip_build=1 ;;
@@ -79,7 +79,7 @@ run_ffmpeg() { # media-dir args... (paths relative to the media dir)
   if command -v ffmpeg >/dev/null; then
     (cd "$media" && ffmpeg "$@")
   else
-    docker run --rm --user root --entrypoint ffmpeg -v "$media:/work" -w /work remote-heavylifter:local "$@"
+    docker run --rm --user root --entrypoint /usr/local/bin/ffmpeg -v "$media:/work" -w /work remote-heavylifter-worker:local "$@"
   fi
 }
 
@@ -136,7 +136,7 @@ Movies/Sintel (2010)/Sintel.mkv|https://download.blender.org/durian/movies/Sinte
     echo "    $name"
   done <<< "$list"
 
-  # Cut Big Buck Bunny into "episodes" (stream copy, instant) so there are enough videos to spread over servers.
+  # Cut Big Buck Bunny into "episodes" (stream copy, instant) so there are enough videos to spread over workers.
   local episodes="Shows/Big Buck Bunny Chapters/Season 1"
   mkdir -p "$media/$episodes"
   for i in 0 1 2 3 4 5 6 7; do
@@ -147,36 +147,52 @@ Movies/Sintel (2010)/Sintel.mkv|https://download.blender.org/durian/movies/Sinte
   done
 }
 
-register_servers() {
+register_workers() {
   step "Waiting for the extension's API"
   if ! curl -fsS "$cove/api/extensions" | grep -q "\"$extension_id\""; then
     echo "Cove did not load $extension_id (it must be built against a Cove.Sdk no newer than the running Cove); see ./setup.sh logs" >&2
     exit 1
   fi
-  wait_http "$api/servers" "The remote-heavylifter extension" 120 json
+  wait_http "$api/workers" "The remote-heavylifter extension" 120 json
+
+  # Workers reach Cove on Docker's network by its service name.
+  curl -fsS -X PUT -H 'Content-Type: application/json' --data '{"coveUrlForWorkers":"http://cove:5073","coveAuthEnabled":false}' \
+    "$api/settings" >/dev/null
+
   local body
-  body=$(curl -fsS "$api/servers" | API_KEY="$api_key" TWO="$two_servers" python3 -c '
+  body=$(curl -fsS "$api/workers" | T1="$worker1_token" T2="$worker2_token" TWO="$two_servers" python3 -c '
 import json, os, sys
-servers = [dict(s, apiKey=None) for s in json.load(sys.stdin)]
-for s in servers:
-    for k in ("hasApiKey", "apiKeyHint"):
-        s.pop(k, None)
-wanted = [("local-1", "http://heavylifter:8750", "/mnt/media")]
+workers = [dict(w, token=None) for w in json.load(sys.stdin)]
+for w in workers:
+    for k in ("hasToken", "tokenHint", "workerTokenId", "connection"):
+        w.pop(k, None)
+wanted = [("worker-1", os.environ["T1"], None)]
 if os.environ["TWO"] == "1":
-    wanted.append(("local-2", "http://heavylifter-2:8750", "/data/library"))
-names = {s["name"] for s in servers}
-added = [w for w in wanted if w[0] not in names]
-servers += [{"id": None, "name": n, "baseUrl": u, "apiKey": os.environ["API_KEY"], "enabled": True,
-             "maxConcurrency": 2, "mappings": [{"covePrefix": "/media", "remotePrefix": r}]} for n, u, r in added]
-print(json.dumps(servers) if added else "")
+    wanted.append(("worker-2", os.environ["T2"], "ws://worker-2:8750/rpc"))
+names = {w["name"] for w in workers}
+added = [x for x in wanted if x[0] not in names]
+workers += [{"id": None, "name": n, "token": t, "url": u, "coveUrlOverride": None, "enabled": True, "maxConcurrency": 2}
+            for n, t, u in added]
+print(json.dumps(workers) if added else "")
 ')
-  if [ -z "$body" ]; then step "Generation servers already registered"; return; fi
-  step "Registering generation server(s)"
-  curl -fsS -X PUT -H 'Content-Type: application/json' --data "$body" "$api/servers" >/dev/null
-  curl -fsS "$api/servers/health?refresh=true" | python3 -c '
+  if [ -n "$body" ]; then
+    step "Registering generation worker(s)"
+    curl -fsS -X PUT -H 'Content-Type: application/json' --data "$body" "$api/workers" >/dev/null
+  else
+    step "Generation workers already registered"
+  fi
+
+  step "Waiting for the workers to connect"
+  local deadline=$((SECONDS + 90)) states=""
+  while [ $SECONDS -lt $deadline ]; do
+    states=$(curl -fsS "$api/workers/health?refresh=true" | python3 -c '
 import json, sys
-for s in json.load(sys.stdin):
-    print("    %-8s %s" % (s["name"], s["state"]) + (" - %s" % s["error"] if s["error"] else ""))'
+for w in json.load(sys.stdin):
+    print("    %-9s %-12s %s" % (w["name"], w["state"], w["connection"]) + (" - %s" % w["error"] if w["error"] else ""))')
+    if ! grep -qvE ' live ' <<< "$states"; then break; fi
+    sleep 3
+  done
+  echo "$states"
 }
 
 complete_cove_setup() {
@@ -213,23 +229,30 @@ esac
 docker info >/dev/null 2>&1 || { echo "Docker is not running." >&2; exit 1; }
 mkdir -p "$data/media" "$data/cove/config/extensions" "$data/cove/generated" "$data/cove/backups"
 
-if [ ! -f "$env_file" ]; then
-  printf 'HL_API_KEY=%s\nCOVE_PORT=%s\n' "$(python3 -c 'import secrets; print(secrets.token_hex(24))')" "$cove_port" > "$env_file"
-fi
-api_key=$(grep '^HL_API_KEY=' "$env_file" | cut -d= -f2-)
+new_token() { python3 -c 'import secrets; print(secrets.token_urlsafe(32))'; }
+[ -f "$env_file" ] || printf 'COVE_PORT=%s\n' "$cove_port" > "$env_file"
+grep -q '^WORKER1_TOKEN=' "$env_file" || printf 'WORKER1_TOKEN=%s\n' "$(new_token)" >> "$env_file"
+grep -q '^WORKER2_TOKEN=' "$env_file" || printf 'WORKER2_TOKEN=%s\n' "$(new_token)" >> "$env_file"
+worker1_token=$(grep '^WORKER1_TOKEN=' "$env_file" | cut -d= -f2-)
+worker2_token=$(grep '^WORKER2_TOKEN=' "$env_file" | cut -d= -f2-)
 
 install_extension
-step "Building the generation server image"
-compose build heavylifter
+step "Building the generation worker image"
+compose build worker-1
 sample_media
 
-step "Starting Cove and the generation server(s)"
-compose up -d
+step "Starting Cove and the generation worker(s)"
+cove_was_running=$(compose ps --status running -q cove 2>/dev/null || true)
+compose up -d --remove-orphans
+if [ -n "$cove_was_running" ]; then
+  step "Restarting Cove to load the freshly installed extension"
+  compose restart cove
+fi
 step "Waiting for Cove (the first start runs database migrations; this can take a few minutes)"
 wait_http "$cove/health" "Cove" 600
 
 complete_cove_setup
-register_servers
+register_workers
 
 step "Scanning the sample library"
 curl -fsS -X POST -H 'Content-Type: application/json' --data '{}' "$cove/api/metadata/scan" >/dev/null \
@@ -241,8 +264,8 @@ Ready.
   Cove:                $cove   (owner: $owner_user / $owner_password; auth is off for local requests)
   Remote Generation:   $cove/settings/remote-generation
   Extension zip:       $zip
-  Generation server:   http://127.0.0.1:8750  (API key in local-test/.env)
-  Sample media:        $data/media   (Cove: /media, server: /mnt/media)
+  Workers:             worker-1 dials Cove; worker-2 (--two-servers) is dialed by Cove (tokens in local-test/.env)
+  Sample media:        $data/media   (Cove: /media; workers read it from Cove over HTTP)
   Generated files:     $data/cove/generated
 
 Wait for the scan to finish (Jobs drawer), then Settings -> Remote Generation -> Generate -> Run.

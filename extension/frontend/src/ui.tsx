@@ -1,6 +1,6 @@
 import type { ButtonHTMLAttributes, ReactNode } from "react";
 import { ChevronDown, ChevronUp, Loader2, PlayCircle } from "lucide-react";
-import type { ServerHealth, ServerState } from "./api";
+import type { WorkerHealth, WorkerState } from "./api";
 
 // Class names are copied from Cove's own settings primitives so the host stylesheet already has them.
 
@@ -147,23 +147,25 @@ export function Message({ tone, children }: { tone: "success" | "error" | "muted
   return <p className={`text-xs ${color}`}>{children}</p>;
 }
 
-const STATE_COLORS: Record<ServerState, string> = {
+const STATE_COLORS: Record<WorkerState, string> = {
   live: "#22c55e",
   offline: "#ef4444",
   unauthorized: "#f59e0b",
   incompatible: "#f59e0b",
   disabled: "#6b7280",
+  waiting: "#6b7280",
 };
 
-const STATE_LABELS: Record<ServerState, string> = {
+const STATE_LABELS: Record<WorkerState, string> = {
   live: "Live",
   offline: "Offline",
-  unauthorized: "Key rejected",
+  unauthorized: "Token rejected",
   incompatible: "Incompatible",
   disabled: "Disabled",
+  waiting: "Waiting for worker",
 };
 
-export function StateBadge({ health }: { health?: ServerHealth }) {
+export function StateBadge({ health }: { health?: WorkerHealth }) {
   if (!health) {
     return <span className="text-xs text-muted">Checking…</span>;
   }
@@ -174,15 +176,13 @@ export function StateBadge({ health }: { health?: ServerHealth }) {
         style={{ width: 8, height: 8, borderRadius: 9999, background: STATE_COLORS[health.state], display: "inline-block" }}
       />
       {STATE_LABELS[health.state]}
-      {health.live && health.latencyMs != null ? <span className="text-muted">· {health.latencyMs} ms</span> : null}
     </span>
   );
 }
 
-export function describeLoad(health?: ServerHealth): string | null {
+export function describeLoad(health?: WorkerHealth): string | null {
   if (!health?.live) return null;
   const parts = [`${health.running ?? 0}/${health.capacity ?? "?"} busy`];
-  if (health.queued) parts.push(`${health.queued} queued`);
   if (health.encoder) parts.push(health.encoder);
   return parts.join(" · ");
 }

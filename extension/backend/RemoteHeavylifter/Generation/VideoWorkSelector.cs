@@ -2,7 +2,6 @@ using Cove.Core.Common;
 using Cove.Core.Entities;
 using Cove.Core.Interfaces;
 using Microsoft.EntityFrameworkCore;
-using RemoteHeavylifter.Servers;
 
 namespace RemoteHeavylifter.Generation;
 
@@ -33,7 +32,6 @@ public sealed class VideoWorkSelector(DbContext db)
     public async Task<SelectionResult> SelectAsync(
         GenerateRequest request,
         GeneratedPaths paths,
-        IReadOnlyList<ServerDefinition> servers,
         CancellationToken ct)
     {
         var filters = PathFilter.Normalize(request.Paths);
@@ -105,7 +103,8 @@ public sealed class VideoWorkSelector(DbContext db)
                 var (cover, preview, sprite) = needs;
 
                 var label = string.IsNullOrWhiteSpace(video.Title) ? file.Basename : video.Title!;
-                if (!File.Exists(FilesystemPaths.ToNativePath(file.Path)))
+                var sourcePath = FilesystemPaths.ToNativePath(file.Path);
+                if (!File.Exists(sourcePath))
                 {
                     settled.Add(new SettledItem(video.Id, label, JobUnitOutcome.Skipped, "Source file is unavailable"));
                     continue;
@@ -116,20 +115,7 @@ public sealed class VideoWorkSelector(DbContext db)
                         file.SourceUnreadableReason ?? "Source file is unreadable"));
                     continue;
                 }
-                // A zero duration is fine: the server probes it itself.
-                var remotePaths = new Dictionary<Guid, string>();
-                foreach (var server in servers)
-                {
-                    if (PathMapper.Map(file.Path, server.Mappings) is { } remote)
-                        remotePaths[server.Id] = remote;
-                }
-                if (remotePaths.Count == 0)
-                {
-                    settled.Add(new SettledItem(video.Id, label, JobUnitOutcome.Failed,
-                        $"No path mapping on the selected servers covers {file.Path}"));
-                    continue;
-                }
-
+                // A zero duration is fine: the worker probes it itself.
                 var vr = vrVideos.TryGetValue(video.Id, out var full)
                     ? VrSupport.Layout(full, file.Path, file.Width, file.Height)
                     : null;
@@ -147,7 +133,8 @@ public sealed class VideoWorkSelector(DbContext db)
                     PreviewScale = VrFilter.OneEyeFlat(vr, PreviewSettings.Width) ?? $"scale={PreviewSettings.Width}:-2",
                     SpriteFilter = VrFilter.OneEyeFlat(vr, spriteWidth),
                     SpriteWidth = spriteWidth,
-                    RemotePaths = remotePaths,
+                    SourcePath = sourcePath,
+                    SourceSize = file.Size,
                 });
             }
         }
@@ -155,29 +142,22 @@ public sealed class VideoWorkSelector(DbContext db)
         return new SelectionResult(work, settled, examined);
     }
 
-    /// <summary>A few primary-file paths under <paramref name="covePrefix"/>, for testing a mapping.</summary>
-    public async Task<IReadOnlyList<string>> SamplePathsAsync(string covePrefix, int count, CancellationToken ct)
+    /// <summary>One readable primary video file, for testing that a worker can read through Cove.</summary>
+    public async Task<(string Path, long Size)?> SampleSourceAsync(CancellationToken ct)
     {
-        var prefix = PathMapper.Normalize(covePrefix);
-        var like = prefix + "/";
-        var paths = await db.Set<VideoFile>()
+        var candidates = await db.Set<VideoFile>()
             .AsNoTracking()
-            .Where(file => file.VideoId != null && file.Path.StartsWith(like))
-            .OrderBy(file => file.Id)
-            .Select(file => file.Path)
-            .Take(count)
+            .Where(file => file.VideoId != null)
+            .OrderBy(file => file.Size)
+            .Select(file => new { file.Path, file.Size })
+            .Take(20)
             .ToListAsync(ct);
-        if (paths.Count == 0)
+        foreach (var candidate in candidates)
         {
-            var lower = like.ToLowerInvariant();
-            paths = await db.Set<VideoFile>()
-                .AsNoTracking()
-                .Where(file => file.VideoId != null && file.Path.ToLower().StartsWith(lower))
-                .OrderBy(file => file.Id)
-                .Select(file => file.Path)
-                .Take(count)
-                .ToListAsync(ct);
+            var path = FilesystemPaths.ToNativePath(candidate.Path);
+            if (File.Exists(path))
+                return (path, candidate.Size);
         }
-        return paths;
+        return null;
     }
 }

@@ -1,0 +1,71 @@
+using System.Globalization;
+using RemoteHeavylifter.Worker.Media;
+
+namespace RemoteHeavylifter.Worker.Hosting;
+
+/// <summary>Worker settings, read from <c>HL_*</c> environment variables.</summary>
+public sealed record WorkerOptions
+{
+    /// <summary>Listen for Cove here (Cove dials the worker), e.g. http://0.0.0.0:8750.</summary>
+    public string? ListenUrl { get; init; }
+
+    /// <summary>Dial Cove here (the worker dials Cove), e.g. http://192.168.1.10:5073.</summary>
+    public string? CoveUrl { get; init; }
+
+    public string Name { get; init; } = Environment.MachineName;
+
+    /// <summary>A fixed token; otherwise one is generated and kept in <see cref="DataDir"/>.</summary>
+    public string? Token { get; init; }
+
+    public string DataDir { get; init; } = "./data";
+    public int MaxConcurrency { get; init; } = Math.Max(1, Environment.ProcessorCount / 4);
+    public string Ffmpeg { get; init; } = "ffmpeg";
+    public string Ffprobe { get; init; } = "ffprobe";
+    public IReadOnlyList<string> FfmpegInputArgs { get; init; } = [];
+    public string Encoder { get; init; } = EncoderArgs.SoftwareEncoder;
+
+    public string TasksDir => Path.Combine(DataDir, "tasks");
+
+    public MediaContext Media => new(Ffmpeg, Ffprobe, FfmpegInputArgs, Encoder);
+
+    public static WorkerOptions FromEnvironment(Func<string, string?>? read = null)
+    {
+        read ??= Environment.GetEnvironmentVariable;
+        string? Get(string name) => read(name) is { } value && !string.IsNullOrWhiteSpace(value) ? value.Trim() : null;
+
+        var defaults = new WorkerOptions();
+        return new WorkerOptions
+        {
+            ListenUrl = Get("HL_LISTEN_URL"),
+            CoveUrl = Get("HL_COVE_URL")?.TrimEnd('/'),
+            Name = Get("HL_WORKER_NAME") ?? defaults.Name,
+            Token = Get("HL_WORKER_TOKEN"),
+            DataDir = Get("HL_DATA_DIR") ?? defaults.DataDir,
+            MaxConcurrency = int.TryParse(Get("HL_MAX_CONCURRENCY"), NumberStyles.Integer, CultureInfo.InvariantCulture, out var max) && max > 0
+                ? max
+                : defaults.MaxConcurrency,
+            Ffmpeg = Get("HL_FFMPEG") ?? defaults.Ffmpeg,
+            Ffprobe = Get("HL_FFPROBE") ?? defaults.Ffprobe,
+            FfmpegInputArgs = Get("HL_FFMPEG_INPUT_ARGS")?.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries) ?? [],
+            Encoder = Get("HL_H264_ENCODER") ?? defaults.Encoder,
+        };
+    }
+
+    /// <summary>Configuration errors that stop the worker from starting.</summary>
+    public IReadOnlyList<string> Validate()
+    {
+        var errors = new List<string>();
+        if (ListenUrl is null && CoveUrl is null)
+            errors.Add("Set HL_LISTEN_URL (Cove connects to the worker) and/or HL_COVE_URL (the worker connects to Cove).");
+        if (ListenUrl is not null && !IsHttp(ListenUrl))
+            errors.Add("HL_LISTEN_URL must be an http:// or https:// address, e.g. http://0.0.0.0:8750.");
+        if (CoveUrl is not null && !IsHttp(CoveUrl))
+            errors.Add("HL_COVE_URL must be Cove's http:// or https:// address, e.g. http://192.168.1.10:5073.");
+        if (Token is { Length: < Protocol.WorkerTokens.MinLength })
+            errors.Add($"HL_WORKER_TOKEN must be at least {Protocol.WorkerTokens.MinLength} characters.");
+        return errors;
+    }
+
+    private static bool IsHttp(string value)
+        => Uri.TryCreate(value, UriKind.Absolute, out var uri) && (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps);
+}

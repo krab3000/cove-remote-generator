@@ -3,76 +3,74 @@ import { extensionFetch } from "@cove/runtime/api";
 export const EXTENSION_ID = "com.cove.remote-heavylifter";
 const BASE = `/api/ext/${EXTENSION_ID}`;
 
-export interface PathMapping {
-  covePrefix: string;
-  remotePrefix: string;
-}
+/** "cove-dials" when the worker has a URL Cove connects to; "worker-dials" when Cove waits for the worker. */
+export type WorkerConnection = "cove-dials" | "worker-dials";
 
-export interface ServerView {
+export interface WorkerView {
   id: string;
   name: string;
-  baseUrl: string;
-  hasApiKey: boolean;
-  apiKeyHint: string | null;
+  workerTokenId: string;
+  hasToken: boolean;
+  tokenHint: string | null;
+  url: string | null;
+  coveUrlOverride: string | null;
   enabled: boolean;
   maxConcurrency: number;
-  mappings: PathMapping[];
+  connection: WorkerConnection;
 }
 
-export interface ServerInput {
+export interface WorkerInput {
   id?: string | null;
   name: string;
-  baseUrl: string;
-  /** null keeps the stored key. */
-  apiKey: string | null;
+  /** null keeps the stored token (or hash). */
+  token: string | null;
+  url: string | null;
+  coveUrlOverride: string | null;
   enabled: boolean;
   maxConcurrency: number;
-  mappings: PathMapping[];
 }
 
-export type ServerState = "live" | "offline" | "unauthorized" | "incompatible" | "disabled";
+export interface PendingWorker {
+  workerTokenId: string;
+  name: string | null;
+  version: string | null;
+  remoteAddress: string | null;
+  firstSeen: string;
+  lastSeen: string;
+}
 
-export interface ServerHealth {
+export type WorkerState = "live" | "offline" | "unauthorized" | "incompatible" | "disabled" | "waiting";
+
+export interface WorkerHealth {
   id: string;
   name: string;
   enabled: boolean;
-  state: ServerState;
+  state: WorkerState;
   live: boolean;
-  latencyMs: number | null;
-  serverVersion: string | null;
+  connection: WorkerConnection;
+  workerVersion: string | null;
   ffmpegVersion: string | null;
   encoder: string | null;
   capacity: number | null;
   running: number | null;
-  queued: number | null;
-  diskFreeBytes: number | null;
+  remoteAddress: string | null;
+  connectedSince: string | null;
   error: string | null;
   checkedAt: string;
 }
 
-export interface MappingSample {
-  covePath: string;
-  remotePath: string | null;
-  allowed: boolean;
-  exists: boolean;
-  readable: boolean;
+export interface WorkerTestResult {
+  ok: boolean;
+  message: string;
 }
 
-export interface MappingCheck {
-  covePrefix: string;
-  remotePrefix: string;
-  samples: MappingSample[];
-  error: string | null;
-}
-
-export interface ServerTestResult {
-  health: ServerHealth;
-  mappings: MappingCheck[];
-  mediaRoots: string[];
+export interface WorkerSettings {
+  coveUrlForWorkers: string | null;
+  coveAuthEnabled: boolean;
 }
 
 export interface GenerateOptions {
-  serverIds: string[];
+  workerIds: string[];
   paths: string[];
   cover: boolean;
   preview: boolean;
@@ -124,12 +122,19 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
-  servers: () => request<ServerView[]>(`${BASE}/servers`),
-  saveServers: (servers: ServerInput[]) =>
-    request<ServerView[]>(`${BASE}/servers`, { method: "PUT", body: JSON.stringify(servers) }),
-  testServer: (server: ServerInput) =>
-    request<ServerTestResult>(`${BASE}/servers/test`, { method: "POST", body: JSON.stringify(server) }),
-  health: (refresh = false) => request<ServerHealth[]>(`${BASE}/servers/health?refresh=${refresh}`),
+  workers: () => request<WorkerView[]>(`${BASE}/workers`),
+  saveWorkers: (workers: WorkerInput[]) =>
+    request<WorkerView[]>(`${BASE}/workers`, { method: "PUT", body: JSON.stringify(workers) }),
+  pendingWorkers: () => request<PendingWorker[]>(`${BASE}/workers/pending`),
+  trustWorker: (workerTokenId: string) =>
+    request<WorkerView>(`${BASE}/workers/pending/${encodeURIComponent(workerTokenId)}/trust`, { method: "POST" }),
+  dismissWorker: (workerTokenId: string) =>
+    request<void>(`${BASE}/workers/pending/${encodeURIComponent(workerTokenId)}`, { method: "DELETE" }),
+  testWorker: (id: string) => request<WorkerTestResult>(`${BASE}/workers/${id}/test`, { method: "POST" }),
+  health: (refresh = false) => request<WorkerHealth[]>(`${BASE}/workers/health?refresh=${refresh}`),
+  settings: () => request<WorkerSettings>(`${BASE}/settings`),
+  saveSettings: (settings: Pick<WorkerSettings, "coveUrlForWorkers">) =>
+    request<WorkerSettings>(`${BASE}/settings`, { method: "PUT", body: JSON.stringify({ ...settings, coveAuthEnabled: false }) }),
   options: () => request<GenerateOptions>(`${BASE}/generate/options`),
   generate: (options: GenerateOptions) =>
     request<{ jobId: string }>(`${BASE}/generate`, { method: "POST", body: JSON.stringify(options) }),
@@ -138,7 +143,9 @@ export const api = {
 };
 
 export const queryKeys = {
-  servers: ["remote-heavylifter", "servers"] as const,
+  workers: ["remote-heavylifter", "workers"] as const,
+  pending: ["remote-heavylifter", "pending"] as const,
+  settings: ["remote-heavylifter", "settings"] as const,
   health: ["remote-heavylifter", "health"] as const,
   options: ["remote-heavylifter", "options"] as const,
   folders: (path: string) => ["remote-heavylifter", "folders", path] as const,

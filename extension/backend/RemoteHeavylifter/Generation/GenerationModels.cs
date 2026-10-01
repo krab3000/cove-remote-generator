@@ -5,7 +5,7 @@ namespace RemoteHeavylifter.Generation;
 /// <summary>What the Generate panel submits (and what the task-list job replays).</summary>
 public sealed record GenerateRequest
 {
-    public IReadOnlyList<Guid> ServerIds { get; init; } = [];
+    public IReadOnlyList<Guid> WorkerIds { get; init; } = [];
     public IReadOnlyList<string> Paths { get; init; } = [];
     public bool Cover { get; init; } = true;
     public bool Preview { get; init; } = true;
@@ -57,8 +57,9 @@ public sealed class WorkItem
     public string? SpriteFilter { get; init; }
     public int SpriteWidth { get; init; } = SpriteSettings.DefaultWidth;
 
-    /// <summary>The source path as each candidate server sees it. Shrinks when a server cannot find the file.</summary>
-    public required Dictionary<Guid, string> RemotePaths { get; init; }
+    /// <summary>The source as this machine opens it (native path); workers read it over HTTP from Cove.</summary>
+    public required string SourcePath { get; init; }
+    public long SourceSize { get; init; }
 
     public int Attempts { get; set; }
     public IJobUnit? Unit { get; set; }

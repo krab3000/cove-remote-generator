@@ -1,5 +1,5 @@
 using System.Text.Json;
-using RemoteHeavylifter.Servers;
+using RemoteHeavylifter.Workers;
 
 namespace RemoteHeavylifter.Generation;
 

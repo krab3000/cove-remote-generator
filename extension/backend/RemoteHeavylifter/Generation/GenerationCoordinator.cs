@@ -3,17 +3,18 @@ using Cove.Core.Interfaces;
 using Cove.Plugins;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
-using RemoteHeavylifter.Remote;
 using IJobProgress = Cove.Core.Interfaces.IJobProgress;
-using RemoteHeavylifter.Servers;
+using RemoteHeavylifter.Workers;
 
 namespace RemoteHeavylifter.Generation;
 
-/// <summary>Runs one remote generation job: pick servers, select videos, distribute, summarize.</summary>
+/// <summary>Runs one remote generation job: pick workers, select videos, distribute, summarize.</summary>
 public sealed class GenerationCoordinator(
-    ServerRegistry registry,
-    HealthMonitor health,
-    IRemoteClientFactory clients,
+    WorkerRegistry registry,
+    WorkerHub hub,
+    WorkerSettingsStore settingsStore,
+    WorkerAccess access,
+    string extensionId,
     IExtensionServiceScopeFactory scopes,
     CoveConfiguration config,
     CoordinatorTimings timings,
@@ -31,17 +32,14 @@ public sealed class GenerationCoordinator(
         var token = linked.Token;
         var stopwatch = Stopwatch.StartNew();
 
-        progress.Report(0, "Checking remote servers…");
-        var chosen = (await registry.GetAllAsync(token))
-            .Where(s => s.Enabled && (request.ServerIds.Count == 0 || request.ServerIds.Contains(s.Id)))
-            .ToList();
-        var probes = await health.ProbeAsync(chosen, refresh: true, token);
-        var live = chosen.Zip(probes)
-            .Where(pair => pair.Second.Live)
-            .Select(pair => new LiveServer(pair.First, Math.Max(1, Math.Min(pair.First.MaxConcurrency, pair.Second.Info!.Capacity))))
-            .ToList();
+        progress.Report(0, "Checking remote workers…");
+        var (live, notes) = await PickWorkersAsync(request, token);
         if (live.Count == 0)
-            throw new InvalidOperationException("No live remote generation servers are available.");
+            throw new InvalidOperationException(notes.Count > 0
+                ? $"No usable remote workers: {string.Join("; ", notes)}"
+                : "No remote workers are connected.");
+        foreach (var note in notes)
+            logger.LogWarning("Remote generation: {Note}", note);
 
         var paths = new GeneratedPaths(config.GeneratedPath);
         var run = new RunContext(Guid.NewGuid().ToString("N")[..12], paths, PreviewSettings.From(config), request.Overwrite);
@@ -51,7 +49,7 @@ public sealed class GenerationCoordinator(
         await using (var scope = scopes.CreateAsyncScope())
         {
             selection = await scope.ServiceProvider.GetRequiredService<VideoWorkSelector>()
-                .SelectAsync(request, paths, live.Select(l => l.Server).ToList(), token);
+                .SelectAsync(request, paths, token);
         }
 
         var counters = new RunCounters { Total = selection.Work.Count + selection.Settled.Count };
@@ -75,23 +73,48 @@ public sealed class GenerationCoordinator(
         }
 
         logger.LogInformation("Remote generation {RunId}: {Count} videos on {Servers}",
-            run.RunId, selection.Work.Count, string.Join(", ", live.Select(l => $"{l.Server.Name}×{l.Slots}")));
+            run.RunId, selection.Work.Count, string.Join(", ", live.Select(l => $"{l.Name}×{l.Slots}")));
 
-        IReadOnlyDictionary<string, int> perServer;
+        IReadOnlyDictionary<string, int> perWorker;
         try
         {
-            var executor = new RunExecutor(clients, health, timings, time, logger);
-            perServer = await executor.ExecuteAsync(live, selection.Work, run, progress, counters, token);
+            var executor = new RunExecutor(hub, access, extensionId, timings, time, logger);
+            perWorker = await executor.ExecuteAsync(live, selection.Work, run, progress, counters, token);
         }
         finally
         {
             TryDeleteDirectory(Path.Combine(paths.TempRoot, run.RunId));
         }
 
-        progress.SetSummary(Summarize(counters, perServer, stopwatch.Elapsed));
+        progress.SetSummary(Summarize(counters, perWorker, stopwatch.Elapsed));
     }
 
-    internal static string Summarize(RunCounters counters, IReadOnlyDictionary<string, int> perServer, TimeSpan elapsed)
+    /// <summary>The enabled, requested workers that are connected and know how to reach Cove.</summary>
+    internal async Task<(List<LiveWorker> Live, List<string> Notes)> PickWorkersAsync(GenerateRequest request, CancellationToken ct)
+    {
+        var settings = await settingsStore.GetAsync(ct);
+        var live = new List<LiveWorker>();
+        var notes = new List<string>();
+        foreach (var worker in await registry.GetAllAsync(ct))
+        {
+            if (!worker.Enabled || (request.WorkerIds.Count > 0 && !request.WorkerIds.Contains(worker.Id)))
+                continue;
+            if (hub.GetSession(worker.Id) is not { } session)
+            {
+                notes.Add($"{worker.Name} is not connected");
+                continue;
+            }
+            if (WorkerHub.ResolveCoveBaseUrl(worker, settings, session.InboundBaseUrl) is not { } baseUrl)
+            {
+                notes.Add($"{worker.Name}: set the Cove URL for workers so it can read and upload files");
+                continue;
+            }
+            live.Add(new LiveWorker(worker.Id, worker.Name, Math.Max(1, Math.Min(worker.MaxConcurrency, session.Info.Capacity)), baseUrl));
+        }
+        return (live, notes);
+    }
+
+    internal static string Summarize(RunCounters counters, IReadOnlyDictionary<string, int> perWorker, TimeSpan elapsed)
     {
         var text = $"Generated {counters.Succeeded} of {counters.Total} videos remotely";
         if (counters.Failed > 0)
@@ -99,8 +122,8 @@ public sealed class GenerationCoordinator(
         if (counters.Skipped > 0)
             text += $", {counters.Skipped} skipped";
         text += $" in {(elapsed.TotalHours >= 1 ? $"{(int)elapsed.TotalHours}h {elapsed.Minutes}m" : $"{elapsed.Minutes}m {elapsed.Seconds}s")}";
-        if (perServer.Count > 0)
-            text += " · " + string.Join(", ", perServer.Select(p => $"{p.Key}: {p.Value}"));
+        if (perWorker.Count > 0)
+            text += " · " + string.Join(", ", perWorker.Select(p => $"{p.Key}: {p.Value}"));
         return text;
     }
 

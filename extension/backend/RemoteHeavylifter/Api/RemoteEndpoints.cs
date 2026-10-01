@@ -6,76 +6,84 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
-using RemoteHeavylifter.Contract;
 using RemoteHeavylifter.Generation;
-using RemoteHeavylifter.Remote;
-using RemoteHeavylifter.Servers;
+using RemoteHeavylifter.Protocol;
+using RemoteHeavylifter.Workers;
 
 namespace RemoteHeavylifter.Api;
 
-public sealed record ServerHealthView(
-    Guid Id,
-    string Name,
-    bool Enabled,
-    string State,
-    bool Live,
-    long? LatencyMs,
-    string? ServerVersion,
-    string? FfmpegVersion,
-    string? Encoder,
-    int? Capacity,
-    int? Running,
-    int? Queued,
-    long? DiskFreeBytes,
-    string? Error,
-    DateTimeOffset CheckedAt)
-{
-    public static ServerHealthView From(ServerHealth health) => new(
-        health.ServerId, health.Name, health.Enabled, health.State, health.Live, health.LatencyMs,
-        health.Info?.ServerVersion, health.Info?.FfmpegVersion, health.Info?.Encoder, health.Info?.Capacity,
-        health.Info?.Running, health.Info?.Queued, health.Info?.DiskFreeBytes, health.Error, health.CheckedAt);
-}
+public sealed record WorkerTestResult(bool Ok, string Message);
 
-public sealed record MappingSample(string CovePath, string? RemotePath, bool Allowed, bool Exists, bool Readable);
-
-public sealed record MappingCheck(string CovePrefix, string RemotePrefix, IReadOnlyList<MappingSample> Samples, string? Error);
-
-public sealed record ServerTestResult(ServerHealthView Health, IReadOnlyList<MappingCheck> Mappings, IReadOnlyList<string> MediaRoots);
+/// <summary>Settings as the UI sees them, plus whether Cove's auth is on (workers on public addresses need it).</summary>
+public sealed record WorkerSettingsView(string? CoveUrlForWorkers, bool CoveAuthEnabled);
 
 public sealed record ErrorBody(string Code, string Message, IReadOnlyList<string>? Errors = null);
 
+/// <summary>The endpoints Cove's own UI calls (configured by people with the right Cove permissions).</summary>
 internal static class RemoteEndpoints
 {
-    private const int SamplesPerMapping = 5;
+    private static readonly TimeSpan TestTimeout = TimeSpan.FromSeconds(30);
 
     public static void Map(IEndpointRouteBuilder endpoints, string extensionId)
     {
         var api = endpoints.MapGroup($"/api/ext/{extensionId}");
 
-        api.MapGet("/servers", async (ServerRegistry registry, CancellationToken ct) =>
-                Results.Ok((await registry.GetAllAsync(ct)).Select(ServerView.From)))
+        api.MapGet("/workers", async (WorkerRegistry registry, CancellationToken ct) =>
+                Results.Ok((await registry.GetAllAsync(ct)).Select(WorkerView.From)))
             .RequireCovePermission(Permissions.ExtensionsConfigure);
 
-        api.MapPut("/servers", async (List<ServerInput> input, ServerRegistry registry, HealthMonitor health, CancellationToken ct) =>
+        api.MapPut("/workers", async (List<WorkerInput> input, WorkerRegistry registry, CancellationToken ct) =>
             {
-                var (servers, errors) = await registry.ReplaceAsync(input, ct);
+                var (workers, errors) = await registry.ReplaceAsync(input, ct);
                 if (errors.Count > 0)
-                    return Results.BadRequest(new ErrorBody("INVALID_SERVERS", "The server list is not valid.", errors));
-                health.Invalidate();
-                return Results.Ok(servers.Select(ServerView.From));
+                    return Results.BadRequest(new ErrorBody("INVALID_WORKERS", "The worker list is not valid.", errors));
+                return Results.Ok(workers.Select(WorkerView.From));
             })
             .RequireCovePermission(Permissions.ExtensionsConfigure);
 
-        api.MapPost("/servers/test", TestServerAsync)
-            .RequireCovePermission(Permissions.ExtensionsConfigure);
-
-        api.MapGet("/servers/health", async (bool? refresh, ServerRegistry registry, HealthMonitor health, CancellationToken ct) =>
+        api.MapGet("/workers/pending", async (PendingWorkers pending, WorkerRegistry registry, CancellationToken ct) =>
             {
-                var servers = await registry.GetAllAsync(ct);
-                var probes = await health.ProbeAsync(servers, refresh ?? false, ct);
-                return Results.Ok(probes.Select(ServerHealthView.From));
+                var configured = (await registry.GetAllAsync(ct)).Select(w => w.TokenHash).ToHashSet();
+                return Results.Ok((await pending.GetAllAsync(ct))
+                    .Where(p => !configured.Contains(p.TokenHash))
+                    .Select(PendingWorkerView.From));
             })
+            .RequireCovePermission(Permissions.ExtensionsConfigure);
+
+        api.MapPost("/workers/pending/{workerTokenId}/trust", async (string workerTokenId, PendingWorkers pending, WorkerRegistry registry, CancellationToken ct) =>
+            {
+                if (await pending.RemoveAsync(workerTokenId, ct) is not { } entry)
+                    return Results.NotFound(new ErrorBody("NOT_PENDING", "No pending worker has that ID."));
+                return Results.Ok(WorkerView.From(await registry.AddTrustedAsync(entry, ct)));
+            })
+            .RequireCovePermission(Permissions.ExtensionsConfigure);
+
+        api.MapDelete("/workers/pending/{workerTokenId}", async (string workerTokenId, PendingWorkers pending, CancellationToken ct) =>
+            {
+                await pending.RemoveAsync(workerTokenId, ct);
+                return Results.NoContent();
+            })
+            .RequireCovePermission(Permissions.ExtensionsConfigure);
+
+        api.MapGet("/workers/health", async (bool? refresh, WorkerHub hub, CancellationToken ct) =>
+                Results.Ok(await hub.GetHealthAsync(refresh ?? false, ct)))
             .RequireCovePermission(PermissionMode.Any, Permissions.JobsRun, Permissions.ExtensionsConfigure);
+
+        api.MapPost("/workers/{id:guid}/test", TestWorkerAsync)
+            .RequireCovePermission(Permissions.ExtensionsConfigure);
+
+        api.MapGet("/settings", async (WorkerSettingsStore settings, CoveConfiguration config, CancellationToken ct) =>
+                Results.Ok(new WorkerSettingsView((await settings.GetAsync(ct)).CoveUrlForWorkers, config.Auth.Enabled)))
+            .RequireCovePermission(Permissions.ExtensionsConfigure);
+
+        api.MapPut("/settings", async (WorkerSettingsView input, WorkerSettingsStore settings, CoveConfiguration config, CancellationToken ct) =>
+            {
+                var errors = await settings.SaveAsync(new WorkerSettings { CoveUrlForWorkers = input.CoveUrlForWorkers }, ct);
+                if (errors.Count > 0)
+                    return Results.BadRequest(new ErrorBody("INVALID_SETTINGS", errors[0], errors));
+                return Results.Ok(new WorkerSettingsView((await settings.GetAsync(ct)).CoveUrlForWorkers, config.Auth.Enabled));
+            })
+            .RequireCovePermission(Permissions.ExtensionsConfigure);
 
         api.MapGet("/generate/options", async (GenerationOptionsStore options, CancellationToken ct) =>
                 Results.Ok(await options.GetAsync(ct)))
@@ -87,63 +95,67 @@ internal static class RemoteEndpoints
             .RequireCovePermission(Permissions.JobsRun, Permissions.ExtensionsConfigure);
     }
 
-    private static async Task<IResult> TestServerAsync(
-        ServerInput input,
-        ServerRegistry registry,
-        HealthMonitor health,
-        IRemoteClientFactory clients,
+    /// <summary>
+    /// Checks the whole path a real task takes: the worker is connected, then it reads a real video from Cove over
+    /// HTTP with its token (ffprobe on the source URL), which also proves the Cove URL it was given is reachable.
+    /// </summary>
+    private static async Task<IResult> TestWorkerAsync(
+        Guid id,
+        WorkerRegistry registry,
+        WorkerHub hub,
+        WorkerSettingsStore settingsStore,
+        WorkerAccess access,
         IExtensionServiceScopeFactory scopes,
         CancellationToken ct)
     {
-        var stored = input.Id is { } id ? (await registry.GetAllAsync(ct)).FirstOrDefault(s => s.Id == id) : null;
-        var errors = new List<string>();
-        var server = ServerRegistry.Normalize(input, stored, errors, input.Name ?? "Server");
-        if (server is null)
-            return Results.BadRequest(new ErrorBody("INVALID_SERVER", "The server settings are not valid.", errors));
-
-        var probe = await health.ProbeAsync(server, refresh: true, ct, includeDisabled: true);
-        var view = ServerHealthView.From(probe);
-        if (!probe.Live)
-            return Results.Ok(new ServerTestResult(view, [], []));
-
-        var client = clients.Create(server);
-        var checks = new List<MappingCheck>();
-        await using var scope = scopes.CreateAsyncScope();
-        var selector = scope.ServiceProvider.GetRequiredService<VideoWorkSelector>();
-        foreach (var mapping in server.Mappings)
+        if ((await registry.GetAllAsync(ct)).FirstOrDefault(w => w.Id == id) is not { } worker)
+            return Results.NotFound(new ErrorBody("NOT_FOUND", "Save the worker first."));
+        if (hub.GetSession(worker.Id) is not { } session)
         {
-            try
-            {
-                var covePaths = await selector.SamplePathsAsync(mapping.CovePrefix, SamplesPerMapping, ct);
-                if (covePaths.Count == 0)
-                {
-                    checks.Add(new MappingCheck(mapping.CovePrefix, mapping.RemotePrefix, [], "No videos in Cove's library are under this path."));
-                    continue;
-                }
-
-                var mapped = covePaths.Select(p => (Cove: p, Remote: PathMapper.Map(p, [mapping]))).ToList();
-                var results = await client.CheckPathsAsync(mapped.Where(m => m.Remote != null).Select(m => m.Remote!).ToList(), ct);
-                var byPath = results.GroupBy(r => r.Path).ToDictionary(g => g.Key, g => g.First());
-                checks.Add(new MappingCheck(mapping.CovePrefix, mapping.RemotePrefix,
-                    mapped.Select(m => m.Remote is { } remote && byPath.TryGetValue(remote, out var r)
-                        ? new MappingSample(m.Cove, remote, r.Allowed, r.Exists, r.Readable)
-                        : new MappingSample(m.Cove, m.Remote, false, false, false)).ToList(),
-                    null));
-            }
-            catch (RemoteException ex)
-            {
-                checks.Add(new MappingCheck(mapping.CovePrefix, mapping.RemotePrefix, [], ex.Message));
-            }
+            var health = (await hub.GetHealthAsync(refresh: false, ct)).FirstOrDefault(h => h.Id == id);
+            return Results.Ok(new WorkerTestResult(false, $"Not connected: {health?.Error ?? "unknown"}"));
         }
 
-        return Results.Ok(new ServerTestResult(view, checks, probe.Info?.MediaRoots ?? []));
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeout.CancelAfter(TestTimeout);
+        try
+        {
+            var info = await session.RefreshInfoAsync(timeout.Token);
+            var settings = await settingsStore.GetAsync(timeout.Token);
+            if (WorkerHub.ResolveCoveBaseUrl(worker, settings, session.InboundBaseUrl) is not { } baseUrl)
+                return Results.Ok(new WorkerTestResult(false, "Connected, but set the Cove URL for workers so it can read and upload files."));
+
+            (string Path, long Size)? sample;
+            await using (var scope = scopes.CreateAsyncScope())
+                sample = await scope.ServiceProvider.GetRequiredService<VideoWorkSelector>().SampleSourceAsync(timeout.Token);
+            if (sample is not { } source)
+                return Results.Ok(new WorkerTestResult(true, $"Connected ({info.Encoder}, {info.Capacity} slots). No video available to test reading with."));
+
+            var taskId = $"test-{Guid.NewGuid():N}";
+            access.Register(new TaskAssignment(taskId, worker.Id, source.Path, [], Path.GetTempPath()));
+            try
+            {
+                var url = $"{baseUrl}/api/ext/{RemoteHeavylifterExtension.ExtensionId}/worker/tasks/{taskId}/source";
+                var probe = await session.ProbeAsync(new ProbeParams(taskId, url), timeout.Token);
+                return Results.Ok(probe.Ok
+                    ? new WorkerTestResult(true, $"Connected ({info.Encoder}, {info.Capacity} slots) and read a video from {baseUrl}.")
+                    : new WorkerTestResult(false, $"Connected, but the worker could not read from {baseUrl}: {probe.Error}"));
+            }
+            finally
+            {
+                access.Remove(taskId);
+            }
+        }
+        catch (Exception ex) when (ex is WorkerException or OperationCanceledException)
+        {
+            return Results.Ok(new WorkerTestResult(false, ex is OperationCanceledException ? "The worker did not answer in time." : ex.Message));
+        }
     }
 
     private static async Task<IResult> StartGenerationAsync(
         GenerateRequest request,
         HttpContext http,
-        ServerRegistry registry,
-        HealthMonitor health,
+        WorkerHub hub,
         GenerationOptionsStore options,
         GenerationCoordinator coordinator,
         IJobService jobs,
@@ -156,30 +168,23 @@ internal static class RemoteEndpoints
             return Results.BadRequest(new ErrorBody("INVALID_SPRITE_WIDTH",
                 $"Sprite tile width must be between {SpriteSettings.MinWidth} and {SpriteSettings.MaxWidth} px."));
         }
-        if (request.ServerIds.Count == 0)
-            return Results.BadRequest(new ErrorBody("NO_SERVERS", "Select at least one generation server."));
+        if (request.WorkerIds.Count == 0)
+            return Results.BadRequest(new ErrorBody("NO_WORKERS", "Select at least one worker."));
 
-        var selected = (await registry.GetAllAsync(ct))
-            .Where(s => s.Enabled && request.ServerIds.Contains(s.Id))
-            .ToList();
-        var probes = await health.ProbeAsync(selected, refresh: true, ct);
-        var live = probes.Where(p => p.Live).ToList();
+        var normalized = request with { Paths = PathFilter.Normalize(request.Paths) };
+        var (live, notes) = await coordinator.PickWorkersAsync(normalized, ct);
         if (live.Count == 0)
         {
             return Results.Json(
-                new ErrorBody("NO_LIVE_SERVERS", "None of the selected generation servers is reachable right now."),
+                new ErrorBody("NO_LIVE_WORKERS", notes.Count > 0 ? string.Join("; ", notes) : "None of the selected workers is connected right now."),
                 statusCode: StatusCodes.Status409Conflict);
         }
 
-        var accepted = request with
-        {
-            ServerIds = live.Select(p => p.ServerId).ToList(),
-            Paths = PathFilter.Normalize(request.Paths),
-        };
-        await options.SaveAsync(request with { Paths = accepted.Paths }, ct);
+        await options.SaveAsync(normalized, ct);
+        var accepted = normalized with { WorkerIds = live.Select(w => w.WorkerId).ToList() };
 
         var owner = JobOwner.FromPrincipal(http.RequestServices.GetService<ICurrentPrincipalAccessor>()?.Current);
-        var description = $"Remote generation on {string.Join(", ", live.Select(p => p.Name))}";
+        var description = $"Remote generation on {string.Join(", ", live.Select(w => w.Name))}";
         var jobId = jobs.EnqueueFor(
             owner,
             $"ext:{RemoteHeavylifterExtension.ExtensionId}:generate",

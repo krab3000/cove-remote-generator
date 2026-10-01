@@ -2,39 +2,28 @@ using System.Globalization;
 using System.Threading.Channels;
 using Cove.Core.Interfaces;
 using Microsoft.Extensions.Logging;
-using RemoteHeavylifter.Contract;
-using RemoteHeavylifter.Remote;
-using RemoteHeavylifter.Servers;
+using RemoteHeavylifter.Protocol;
+using RemoteHeavylifter.Workers;
 
 namespace RemoteHeavylifter.Generation;
 
 public sealed record CoordinatorTimings(
-    IReadOnlyList<TimeSpan> PollDelays,
     TimeSpan ReviveInterval,
     TimeSpan AllDeadGrace,
-    TimeSpan DeferDelay,
-    TimeSpan QueuedTimeout,
     TimeSpan RunningTimeout,
-    TimeSpan CleanupTimeout,
     int MaxAttempts,
-    int FailuresBeforeDead,
-    int PollErrorsBeforeGivingUp)
+    int FailuresBeforeDead)
 {
     public static CoordinatorTimings Default { get; } = new(
-        [TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(3), TimeSpan.FromSeconds(5)],
-        ReviveInterval: TimeSpan.FromSeconds(30),
+        ReviveInterval: TimeSpan.FromSeconds(5),
         AllDeadGrace: TimeSpan.FromMinutes(2),
-        DeferDelay: TimeSpan.FromMilliseconds(500),
-        QueuedTimeout: TimeSpan.FromHours(1),
         RunningTimeout: TimeSpan.FromMinutes(20),
-        CleanupTimeout: TimeSpan.FromSeconds(5),
         MaxAttempts: 3,
-        FailuresBeforeDead: 3,
-        PollErrorsBeforeGivingUp: 3);
+        FailuresBeforeDead: 3);
 }
 
-/// <summary>A server taking part in a run, with how many videos it may work on at once.</summary>
-public sealed record LiveServer(ServerDefinition Server, int Slots);
+/// <summary>A worker taking part in a run: how many videos it may work on at once, and how it reaches Cove.</summary>
+public sealed record LiveWorker(Guid WorkerId, string Name, int Slots, string CoveBaseUrl);
 
 public sealed record RunContext(string RunId, GeneratedPaths Paths, PreviewSettings Preview, bool Overwrite);
 
@@ -50,23 +39,24 @@ public sealed class RunCounters
 }
 
 /// <summary>
-/// Spreads one run's videos over the live servers. Each server gets as many worker loops as it has
-/// slots; a worker submits one video, polls it, downloads and commits the artifacts, then deletes the
-/// remote task. A server that keeps failing is marked dead: its workers stop and whatever it held goes
-/// back on the queue for the others, and a reviver brings it back if it recovers.
+/// Spreads one run's videos over the live workers. Each worker gets as many loops as it has slots; a loop
+/// submits one video over the worker's session and waits for it to finish — the worker reads the source and
+/// uploads the artifacts through the extension's HTTP endpoints — then commits what was uploaded. A worker
+/// that keeps failing or disconnects is marked dead: its loops stop and whatever it held goes back on the
+/// queue for the others, and a reviver brings it back when its session reconnects.
 /// </summary>
 internal sealed class RunExecutor(
-    IRemoteClientFactory clients,
-    HealthMonitor health,
+    IWorkerDirectory workers,
+    WorkerAccess access,
+    string extensionId,
     CoordinatorTimings timings,
     TimeProvider time,
     ILogger logger)
 {
-    private sealed class Slot(LiveServer live, IRemoteClient client)
+    private sealed class Slot(LiveWorker live)
     {
-        public LiveServer Live { get; } = live;
-        public IRemoteClient Client { get; } = client;
-        public ServerDefinition Server => Live.Server;
+        public LiveWorker Live { get; } = live;
+        public string Name => Live.Name;
         public volatile bool Dead;
         public DateTimeOffset DeadSince;
         public string? LastError;
@@ -87,7 +77,7 @@ internal sealed class RunExecutor(
     private int _remaining;
 
     public async Task<IReadOnlyDictionary<string, int>> ExecuteAsync(
-        IReadOnlyList<LiveServer> servers,
+        IReadOnlyList<LiveWorker> live,
         IReadOnlyList<WorkItem> items,
         RunContext run,
         IJobProgress progress,
@@ -106,7 +96,7 @@ internal sealed class RunExecutor(
 
         using var runCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         _token = runCts.Token;
-        _slots = servers.Select(s => new Slot(s, clients.Create(s.Server))).ToList();
+        _slots = live.Select(w => new Slot(w)).ToList();
         foreach (var slot in _slots)
             StartWorkers(slot);
         var reviver = Task.Run(ReviveLoopAsync, CancellationToken.None);
@@ -124,7 +114,7 @@ internal sealed class RunExecutor(
             await Task.WhenAll(all).ContinueWith(static _ => { }, TaskScheduler.Default);
         }
 
-        return _slots.ToDictionary(s => s.Server.Name, s => s.Succeeded);
+        return _slots.ToDictionary(s => s.Name, s => s.Succeeded);
     }
 
     // ---- workers ----------------------------------------------------------------------------
@@ -148,10 +138,7 @@ internal sealed class RunExecutor(
             {
                 if (slot.Dead || !_queue.Reader.TryRead(out var item))
                     continue;
-                if (item.RemotePaths.TryGetValue(slot.Server.Id, out var remotePath))
-                    await ProcessAsync(slot, item, remotePath);
-                else
-                    await DeferAsync(item);
+                await ProcessAsync(slot, item);
             }
         }
         catch (OperationCanceledException) when (_token.IsCancellationRequested)
@@ -159,7 +146,7 @@ internal sealed class RunExecutor(
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "Remote generation worker for {Server} stopped unexpectedly", slot.Server.Name);
+            logger.LogError(ex, "Remote generation loop for {Worker} stopped unexpectedly", slot.Name);
         }
         finally
         {
@@ -167,94 +154,95 @@ internal sealed class RunExecutor(
         }
     }
 
-    /// <summary>This server cannot reach the item's file; leave it for one that can.</summary>
-    private async Task DeferAsync(WorkItem item)
+    private async Task ProcessAsync(Slot slot, WorkItem item)
     {
-        var candidates = _slots.Where(s => item.RemotePaths.ContainsKey(s.Server.Id)).ToList();
-        var now = time.GetUtcNow();
-        if (candidates.Count == 0 || candidates.All(s => s.Dead && now - s.DeadSince >= timings.AllDeadGrace))
+        if (workers.GetSession(slot.Live.WorkerId) is not { } session)
         {
-            var notes = item.Notes.Count > 0 ? string.Join("; ", item.Notes) : "no live server can reach the file";
-            Finish(item, null, JobUnitOutcome.Failed, notes);
+            // The connection dropped between runs of this loop; hand the item to someone else.
+            MarkDead(slot, "disconnected");
+            _queue.Writer.TryWrite(item);
             return;
         }
 
-        await Task.Delay(timings.DeferDelay, time, _token);
-        _queue.Writer.TryWrite(item);
-    }
-
-    private async Task ProcessAsync(Slot slot, WorkItem item, string remotePath)
-    {
         item.Unit ??= _progress.StartUnit(item.VideoId.ToString(CultureInfo.InvariantCulture), item.Label);
         item.Attempts++;
-        var clientTaskId = $"cove-{_run.RunId}-{item.VideoId}-a{item.Attempts}";
-        item.Unit.Report(0, $"{slot.Server.Name}: submitting");
-        string? taskId = null;
+        var taskId = $"{_run.RunId}-{item.VideoId}-a{item.Attempts}";
+        var uploadDir = Path.Combine(_run.Paths.TempRoot, _run.RunId, item.VideoId.ToString(CultureInfo.InvariantCulture), $"a{item.Attempts}");
+        var assignment = new TaskAssignment(taskId, slot.Live.WorkerId, item.SourcePath, RequestedKinds(item), uploadDir);
+        access.Register(assignment);
+        item.Unit.Report(0, $"{slot.Name}: submitting");
 
+        var runningTimeout = timings.RunningTimeout + TimeSpan.FromSeconds(Math.Max(0, item.Duration) / 4);
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(_token);
+        timeout.CancelAfter(runningTimeout);
         try
         {
-            var status = await slot.Client.SubmitAsync(BuildRequest(item, remotePath, clientTaskId), _token);
-            taskId = status.TaskId;
-            status = await PollAsync(slot, item, status);
+            var result = await session.RunTaskAsync(
+                BuildRequest(item, taskId, slot.Live.CoveBaseUrl),
+                p => item.Unit?.Report(p.Progress, $"{slot.Name}: {p.Stage ?? "working"}"),
+                timeout.Token);
+
+            // A worker that cannot reach Cove is a problem with that worker, not the video: count it against
+            // the worker (so it is taken out after a few) and let another one try.
+            if (result.ErrorCode == ErrorCodes.SourceUnreachable)
+                throw new WorkerException($"{slot.Name} could not read the source from Cove: {result.Error}", transient: true, result.ErrorCode);
             Interlocked.Exchange(ref slot.ConsecutiveFailures, 0);
 
-            if (status.Status is RemoteTaskStates.Failed or RemoteTaskStates.Cancelled)
+            if (result.Status is TaskStates.Failed or TaskStates.Cancelled)
             {
-                switch (status.ErrorCode)
-                {
-                    case "server_restarted":
-                        throw new RemoteException($"{slot.Server.Name} restarted while generating", transient: true);
-                    case "source_not_found":
-                        ExcludeServer(slot, item, status.Error ?? "source file not found");
-                        return;
-                    default:
-                        Finish(item, slot, JobUnitOutcome.Failed, $"{slot.Server.Name}: {status.Error ?? "generation failed"}");
-                        return;
-                }
+                Finish(item, slot, JobUnitOutcome.Failed, $"{slot.Name}: {result.Error ?? "generation failed"}");
+                return;
             }
 
-            var errors = await CollectAsync(slot, item, status);
+            var errors = Collect(item, assignment, result);
             Finish(item, slot,
                 errors.Count == 0 ? JobUnitOutcome.Succeeded : JobUnitOutcome.Failed,
-                errors.Count == 0 ? null : $"{slot.Server.Name}: {string.Join("; ", errors)}");
+                errors.Count == 0 ? null : $"{slot.Name}: {string.Join("; ", errors)}");
         }
         catch (OperationCanceledException) when (_token.IsCancellationRequested)
         {
             throw;
         }
-        catch (RemoteException ex) when (ex.Code == "path_not_allowed")
+        catch (OperationCanceledException)
         {
-            ExcludeServer(slot, item, "the mapped path is outside the server's media roots");
+            OnTransientFailure(slot, item, new WorkerException(
+                $"{slot.Name}: did not finish within {runningTimeout.TotalMinutes:0} minutes", transient: true));
         }
-        catch (RemoteException ex) when (ex.IsAuthFailure)
-        {
-            MarkDead(slot, "the server rejected the API key");
-            item.Attempts--;
-            _queue.Writer.TryWrite(item);
-        }
-        catch (RemoteException ex) when (ex.Transient)
+        catch (WorkerException ex) when (ex.Transient)
         {
             OnTransientFailure(slot, item, ex);
         }
         catch (Exception ex)
         {
-            Finish(item, slot, JobUnitOutcome.Failed, $"{slot.Server.Name}: {ex.Message}");
+            Finish(item, slot, JobUnitOutcome.Failed, $"{slot.Name}: {ex.Message}");
         }
         finally
         {
-            if (taskId is not null)
-                await DeleteQuietlyAsync(slot, taskId);
+            access.Remove(taskId);
+            TryDeleteDirectory(uploadDir);
         }
     }
 
-    private RemoteTaskRequest BuildRequest(WorkItem item, string remotePath, string clientTaskId)
+    internal static IReadOnlyList<string> RequestedKinds(WorkItem item)
+    {
+        var kinds = new List<string>();
+        if (item.Cover) kinds.Add(ArtifactKinds.Cover);
+        if (item.Preview) kinds.Add(ArtifactKinds.Preview);
+        if (item.Sprite) kinds.AddRange([ArtifactKinds.Sprite, ArtifactKinds.Vtt]);
+        return kinds;
+    }
+
+    private TaskRequest BuildRequest(WorkItem item, string taskId, string coveBaseUrl)
     {
         var preview = _run.Preview;
-        return new RemoteTaskRequest(
-            clientTaskId,
+        var taskUrl = $"{coveBaseUrl.TrimEnd('/')}/api/ext/{extensionId}/worker/tasks/{Uri.EscapeDataString(taskId)}";
+        return new TaskRequest(
+            taskId,
             item.VideoId,
-            remotePath,
+            $"{taskUrl}/source",
+            item.SourceSize,
             item.Duration,
+            RequestedKinds(item).ToDictionary(kind => kind, kind => $"{taskUrl}/artifacts/{kind}"),
             item.Cover ? new CoverSpec(item.CoverSeek, item.CoverFilter) : null,
             item.Preview
                 ? new PreviewSpec(preview.Segments, preview.SegmentDuration, preview.ExcludeStart, preview.ExcludeEnd,
@@ -263,139 +251,81 @@ internal sealed class RunExecutor(
             item.Sprite ? new SpriteSpec(SpriteSettings.MaxFrames, item.SpriteWidth, item.SpriteFilter, GeneratedPaths.SpriteFileName(item.VideoId)) : null);
     }
 
-    private async Task<RemoteTaskStatus> PollAsync(Slot slot, WorkItem item, RemoteTaskStatus status)
-    {
-        var submittedAt = time.GetUtcNow();
-        DateTimeOffset? runningSince = status.Status == RemoteTaskStates.Running ? submittedAt : null;
-        var runningTimeout = timings.RunningTimeout + TimeSpan.FromSeconds(Math.Max(0, item.Duration) / 4);
-        var poll = 0;
-        var errors = 0;
-
-        while (!status.IsTerminal)
-        {
-            var now = time.GetUtcNow();
-            if (runningSince is null && now - submittedAt > timings.QueuedTimeout)
-                throw new RemoteException($"{slot.Server.Name}: waited too long in the server's queue", transient: true);
-            if (runningSince is { } started && now - started > runningTimeout)
-                throw new RemoteException($"{slot.Server.Name}: did not finish within {runningTimeout.TotalMinutes:0} minutes", transient: true);
-
-            await Task.Delay(timings.PollDelays[Math.Min(poll++, timings.PollDelays.Count - 1)], time, _token);
-
-            RemoteTaskStatus? next;
-            try
-            {
-                next = await slot.Client.GetTaskAsync(status.TaskId, _token);
-                errors = 0;
-            }
-            catch (RemoteException ex) when (ex.Transient)
-            {
-                if (++errors >= timings.PollErrorsBeforeGivingUp)
-                    throw;
-                continue;
-            }
-
-            status = next ?? throw new RemoteException($"{slot.Server.Name} no longer knows the task (restarted?)", transient: true);
-            if (status.Status == RemoteTaskStates.Running && runningSince is null)
-                runningSince = time.GetUtcNow();
-            item.Unit?.Report(status.Progress, $"{slot.Server.Name}: {status.Status}");
-        }
-
-        return status;
-    }
-
-    /// <summary>Download and commit every requested artifact the server produced. Returns what is missing.</summary>
-    private async Task<List<string>> CollectAsync(Slot slot, WorkItem item, RemoteTaskStatus status)
+    /// <summary>Commit every requested artifact the worker produced and uploaded. Returns what is missing.</summary>
+    private List<string> Collect(WorkItem item, TaskAssignment assignment, TaskResult result)
     {
         var errors = new List<string>();
         var paths = _run.Paths;
         var id = item.VideoId;
-        var dir = Path.Combine(paths.TempRoot, _run.RunId, id.ToString(CultureInfo.InvariantCulture));
-        Directory.CreateDirectory(dir);
-        try
+
+        if (item.Cover)
         {
-            if (item.Cover)
-            {
-                if (Artifact(status, ArtifactKinds.Cover) is { Succeeded: true } cover)
-                {
-                    var file = await DownloadAsync(slot, status.TaskId, ArtifactKinds.Cover, cover, Path.Combine(dir, "cover.jpg"));
-                    ArtifactCommitter.CommitSingle(file, paths.Cover(id), _run.Overwrite);
-                }
-                else
-                {
-                    errors.Add(Describe(ArtifactKinds.Cover, Artifact(status, ArtifactKinds.Cover)));
-                }
-            }
-
-            if (item.Preview)
-            {
-                if (Artifact(status, ArtifactKinds.Preview) is { Succeeded: true } preview)
-                {
-                    var file = await DownloadAsync(slot, status.TaskId, ArtifactKinds.Preview, preview, Path.Combine(dir, "preview.mp4"));
-                    ArtifactCommitter.CommitSingle(file, paths.Preview(id), _run.Overwrite);
-                }
-                else
-                {
-                    errors.Add(Describe(ArtifactKinds.Preview, Artifact(status, ArtifactKinds.Preview)));
-                }
-            }
-
-            if (item.Sprite)
-            {
-                var sprite = Artifact(status, ArtifactKinds.Sprite);
-                var vtt = Artifact(status, ArtifactKinds.Vtt);
-                if (sprite is { Succeeded: true } && vtt is { Succeeded: true })
-                {
-                    var spriteFile = await DownloadAsync(slot, status.TaskId, ArtifactKinds.Sprite, sprite, Path.Combine(dir, "sprite.jpg"));
-                    var vttFile = await DownloadAsync(slot, status.TaskId, ArtifactKinds.Vtt, vtt, Path.Combine(dir, "thumbs.vtt"));
-                    ArtifactCommitter.CommitSpritePair(spriteFile, vttFile, paths.Sprite(id), paths.SpriteVtt(id), _run.Overwrite);
-                }
-                else
-                {
-                    errors.Add(Describe(ArtifactKinds.Sprite, sprite is { Succeeded: true } ? vtt : sprite));
-                }
-            }
+            if (Uploaded(assignment, result, ArtifactKinds.Cover, out var file, out var error))
+                ArtifactCommitter.CommitSingle(file, paths.Cover(id), _run.Overwrite);
+            else
+                errors.Add(error);
         }
-        finally
+
+        if (item.Preview)
         {
-            TryDeleteDirectory(dir);
+            if (Uploaded(assignment, result, ArtifactKinds.Preview, out var file, out var error))
+                ArtifactCommitter.CommitSingle(file, paths.Preview(id), _run.Overwrite);
+            else
+                errors.Add(error);
+        }
+
+        if (item.Sprite)
+        {
+            if (!Uploaded(assignment, result, ArtifactKinds.Sprite, out var sprite, out var error)
+                || !Uploaded(assignment, result, ArtifactKinds.Vtt, out var vtt, out error))
+                errors.Add(error);
+            else
+                ArtifactCommitter.CommitSpritePair(sprite, vtt, paths.Sprite(id), paths.SpriteVtt(id), _run.Overwrite);
         }
 
         return errors;
     }
 
-    private async Task<string> DownloadAsync(Slot slot, string taskId, string kind, RemoteArtifact artifact, string destination)
+    /// <summary>The worker says it produced the artifact; check that exactly that file arrived.</summary>
+    private static bool Uploaded(TaskAssignment assignment, TaskResult result, string kind, out string file, out string error)
     {
-        var result = await slot.Client.DownloadArtifactAsync(taskId, kind, destination, _token);
-        if (artifact.Size is { } size && size != result.Length)
-            throw new RemoteException($"{kind} download was truncated ({result.Length} of {size} bytes)", transient: true);
-        if (artifact.Sha256 is { Length: > 0 } sha && !string.Equals(sha, result.Sha256, StringComparison.OrdinalIgnoreCase))
-            throw new RemoteException($"{kind} download failed its checksum", transient: true);
-        return destination;
+        file = "";
+        if (!result.Artifacts.TryGetValue(kind, out var artifact) || !artifact.Succeeded)
+        {
+            error = $"{kind} failed{(artifact?.Error is { Length: > 0 } reason ? $" ({reason})" : "")}";
+            return false;
+        }
+        if (assignment.Upload(kind) is not { } upload)
+        {
+            error = $"{kind} was not uploaded";
+            return false;
+        }
+        if (artifact.Size is { } size && size != upload.Size)
+        {
+            error = $"{kind} upload was truncated ({upload.Size} of {size} bytes)";
+            return false;
+        }
+        if (artifact.Sha256 is { Length: > 0 } sha && !string.Equals(sha, upload.Sha256, StringComparison.OrdinalIgnoreCase))
+        {
+            error = $"{kind} upload failed its checksum";
+            return false;
+        }
+
+        file = upload.Path;
+        error = "";
+        return true;
     }
-
-    private static RemoteArtifact? Artifact(RemoteTaskStatus status, string kind)
-        => status.Artifacts.TryGetValue(kind, out var artifact) ? artifact : null;
-
-    private static string Describe(string kind, RemoteArtifact? artifact)
-        => $"{kind} failed{(artifact?.Error is { Length: > 0 } error ? $" ({error})" : "")}";
 
     // ---- outcomes ---------------------------------------------------------------------------
 
-    private void ExcludeServer(Slot slot, WorkItem item, string reason)
-    {
-        item.RemotePaths.Remove(slot.Server.Id);
-        item.Notes.Add($"{slot.Server.Name}: {reason}");
-        if (item.RemotePaths.Count == 0)
-            Finish(item, null, JobUnitOutcome.Failed, string.Join("; ", item.Notes));
-        else
-            _queue.Writer.TryWrite(item);
-    }
-
-    private void OnTransientFailure(Slot slot, WorkItem item, RemoteException ex)
+    private void OnTransientFailure(Slot slot, WorkItem item, WorkerException ex)
     {
         var failures = Interlocked.Increment(ref slot.ConsecutiveFailures);
-        logger.LogWarning("Remote generation of video {VideoId} on {Server} failed (attempt {Attempt}): {Error}",
-            item.VideoId, slot.Server.Name, item.Attempts, ex.Message);
+        logger.LogWarning("Remote generation of video {VideoId} on {Worker} failed (attempt {Attempt}): {Error}",
+            item.VideoId, slot.Name, item.Attempts, ex.Message);
+        // A dropped connection takes the worker out at once; the reviver brings it back when it reconnects.
+        if (workers.GetSession(slot.Live.WorkerId) is null)
+            MarkDead(slot, ex.Message);
         if (failures >= timings.FailuresBeforeDead)
             MarkDead(slot, ex.Message);
 
@@ -419,7 +349,7 @@ internal sealed class RunExecutor(
             slot.DeadSince = time.GetUtcNow();
             slot.LastError = reason;
         }
-        logger.LogWarning("Remote generation server {Server} taken out of the run: {Reason}", slot.Server.Name, reason);
+        logger.LogWarning("Remote worker {Worker} taken out of the run: {Reason}", slot.Name, reason);
     }
 
     private void Finish(WorkItem item, Slot? slot, JobUnitOutcome outcome, string? message)
@@ -447,7 +377,7 @@ internal sealed class RunExecutor(
         _progress.Report(
             _counters.Total == 0 ? 1 : (double)_counters.Done / _counters.Total,
             $"{_counters.Done} / {_counters.Total} videos · {Volatile.Read(ref _counters.Failed)} failed · "
-            + $"{Volatile.Read(ref _counters.Skipped)} skipped · {live} server{(live == 1 ? "" : "s")} live");
+            + $"{Volatile.Read(ref _counters.Skipped)} skipped · {live} worker{(live == 1 ? "" : "s")} live");
 
         if (Interlocked.Decrement(ref _remaining) == 0)
         {
@@ -456,7 +386,7 @@ internal sealed class RunExecutor(
         }
     }
 
-    // ---- server recovery --------------------------------------------------------------------
+    // ---- worker recovery --------------------------------------------------------------------
 
     private async Task ReviveLoopAsync()
     {
@@ -468,24 +398,23 @@ internal sealed class RunExecutor(
 
                 foreach (var slot in _slots.Where(s => s.Dead))
                 {
-                    var probe = await health.ProbeAsync(slot.Server, refresh: true, _token);
-                    if (!probe.Live)
+                    if (workers.GetSession(slot.Live.WorkerId) is null)
                         continue;
                     lock (slot)
                     {
                         slot.Dead = false;
                         slot.ConsecutiveFailures = 0;
                     }
-                    logger.LogInformation("Remote generation server {Server} is back; resuming work on it", slot.Server.Name);
+                    logger.LogInformation("Remote worker {Worker} is back; resuming work on it", slot.Name);
                     StartWorkers(slot);
                 }
 
                 var now = time.GetUtcNow();
                 if (_slots.All(s => s.Dead && Volatile.Read(ref s.ActiveWorkers) == 0 && now - s.DeadSince >= timings.AllDeadGrace))
                 {
-                    var reasons = string.Join("; ", _slots.Select(s => $"{s.Server.Name}: {s.LastError}"));
+                    var reasons = string.Join("; ", _slots.Select(s => $"{s.Name}: {s.LastError}"));
                     while (_queue.Reader.TryRead(out var item))
-                        Finish(item, null, JobUnitOutcome.Failed, $"No live remote generation servers ({reasons})");
+                        Finish(item, null, JobUnitOutcome.Failed, $"No live remote workers ({reasons})");
                 }
             }
         }
@@ -499,20 +428,6 @@ internal sealed class RunExecutor(
     }
 
     // ---- cleanup ----------------------------------------------------------------------------
-
-    private async Task DeleteQuietlyAsync(Slot slot, string taskId)
-    {
-        using var cts = new CancellationTokenSource(timings.CleanupTimeout);
-        try
-        {
-            await slot.Client.DeleteTaskAsync(taskId, cts.Token);
-        }
-        catch (Exception ex)
-        {
-            // The server's janitor removes it after its TTL anyway.
-            logger.LogDebug(ex, "Could not delete remote task {TaskId} on {Server}", taskId, slot.Server.Name);
-        }
-    }
 
     private static void TryDeleteDirectory(string path)
     {

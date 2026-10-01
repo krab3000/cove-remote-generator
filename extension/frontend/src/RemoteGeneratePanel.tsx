@@ -27,8 +27,8 @@ export function RemoteGeneratePanel() {
   const [expanded, setExpanded] = useState(false);
   const [status, setStatus] = useState<{ tone: "success" | "error"; text: string } | null>(null);
 
-  const servers = useMemo(() => (healthQuery.data ?? []).filter((s) => s.enabled), [healthQuery.data]);
-  const liveIds = useMemo(() => new Set(servers.filter((s) => s.live).map((s) => s.id)), [servers]);
+  const workers = useMemo(() => (healthQuery.data ?? []).filter((w) => w.enabled), [healthQuery.data]);
+  const liveIds = useMemo(() => new Set(workers.filter((w) => w.live).map((w) => w.id)), [workers]);
 
   // Seed the form from the last run once both the options and the first health check are in.
   useEffect(() => {
@@ -37,7 +37,7 @@ export function RemoteGeneratePanel() {
     setArtifacts({ cover: last.cover, preview: last.preview, sprite: last.sprite, overwrite: last.overwrite });
     setSpriteWidthText(String(last.spriteWidth ?? SPRITE_WIDTH.default));
     setPaths(last.paths ?? []);
-    const remembered = (last.serverIds ?? []).filter((id) => liveIds.has(id));
+    const remembered = (last.workerIds ?? []).filter((id) => liveIds.has(id));
     setSelected(new Set(remembered.length > 0 ? remembered : liveIds));
     setInitialized(true);
   }, [initialized, optionsQuery.data, healthQuery.data, liveIds]);
@@ -58,14 +58,14 @@ export function RemoteGeneratePanel() {
         ...artifacts,
         spriteWidth: spriteWidthValid ? spriteWidth : SPRITE_WIDTH.default,
         paths,
-        serverIds: selectedLive,
+        workerIds: selectedLive,
       }),
     onSuccess: ({ jobId }) => {
       setStatus({ tone: "success", text: `Job ${jobId} started. Follow its progress in the Jobs drawer.` });
       void queryClient.invalidateQueries({ queryKey: queryKeys.options });
     },
     onError: (error) => {
-      if (error instanceof ApiError && error.code === "NO_LIVE_SERVERS") {
+      if (error instanceof ApiError && error.code === "NO_LIVE_WORKERS") {
         void queryClient.invalidateQueries({ queryKey: queryKeys.health });
       }
       setStatus({ tone: "error", text: (error as Error).message });
@@ -73,7 +73,7 @@ export function RemoteGeneratePanel() {
   });
 
   const refresh = () => void api.health(true).then((data) => queryClient.setQueryData(queryKeys.health, data));
-  const toggleServer = (id: string, checked: boolean) =>
+  const toggleWorker = (id: string, checked: boolean) =>
     setSelected((current) => {
       const next = new Set(current);
       if (checked) next.add(id);
@@ -84,13 +84,13 @@ export function RemoteGeneratePanel() {
     setPaths((current) => (checked ? [...new Set([...current, path])] : current.filter((p) => p !== path)));
 
   const blocker = !healthQuery.data
-    ? "Checking servers…"
-    : servers.length === 0
-      ? "Add and enable a generation server above first."
+    ? "Checking workers…"
+    : workers.length === 0
+      ? "Add and enable a worker above first."
       : liveIds.size === 0
-        ? "No generation server is reachable right now, so a job cannot start."
+        ? "No worker is connected right now, so a job cannot start."
         : selectedLive.length === 0
-          ? "Select at least one live server."
+          ? "Select at least one live worker."
           : !anyArtifact
             ? "Select at least one thing to generate."
             : artifacts.sprite && !spriteWidthValid
@@ -107,7 +107,7 @@ export function RemoteGeneratePanel() {
     <Section title="Generate">
       <ExpandableCard
         label="Remote generate"
-        description="Generate video covers, previews and sprite sheets on the selected servers. Files land in Cove's generated folder exactly where Cove's own generate task puts them."
+        description="Generate video covers, previews and sprite sheets on the selected workers. Files land in Cove's generated folder exactly where Cove's own generate task puts them."
         actions={<RunButton onRun={() => run.mutate()} isPending={run.isPending} disabled={blocker !== null} />}
         expanded={expanded}
         onToggleExpand={() => setExpanded((open) => !open)}
@@ -163,27 +163,27 @@ export function RemoteGeneratePanel() {
 
           <div className="space-y-2">
             <div className="flex items-center justify-between">
-              <p className="text-xs font-medium uppercase tracking-wide text-muted">Servers</p>
-              <Button onClick={refresh} title="Check the servers now">
+              <p className="text-xs font-medium uppercase tracking-wide text-muted">Workers</p>
+              <Button onClick={refresh} title="Check the workers now">
                 <RefreshCw className={`h-3.5 w-3.5 ${healthQuery.isFetching ? "animate-spin" : ""}`} />
                 Refresh
               </Button>
             </div>
-            {servers.length === 0 && healthQuery.data ? (
-              <Message tone="muted">No enabled generation servers.</Message>
+            {workers.length === 0 && healthQuery.data ? (
+              <Message tone="muted">No enabled workers.</Message>
             ) : null}
-            {servers.map((server) => (
-              <div key={server.id} className="flex flex-wrap items-center gap-3">
+            {workers.map((worker) => (
+              <div key={worker.id} className="flex flex-wrap items-center gap-3">
                 <Checkbox
-                  label={server.name}
-                  checked={server.live && selected.has(server.id)}
-                  disabled={!server.live}
-                  onChange={(checked) => toggleServer(server.id, checked)}
-                  title={server.error ?? undefined}
+                  label={worker.name}
+                  checked={worker.live && selected.has(worker.id)}
+                  disabled={!worker.live}
+                  onChange={(checked) => toggleWorker(worker.id, checked)}
+                  title={worker.error ?? undefined}
                 />
-                <StateBadge health={server} />
-                {describeLoad(server) ? <span className="text-xs text-muted">{describeLoad(server)}</span> : null}
-                {!server.live && server.error ? <span className="text-[11px] text-red-300">{server.error}</span> : null}
+                <StateBadge health={worker} />
+                {describeLoad(worker) ? <span className="text-xs text-muted">{describeLoad(worker)}</span> : null}
+                {!worker.live && worker.error ? <span className="text-[11px] text-red-300">{worker.error}</span> : null}
               </div>
             ))}
           </div>

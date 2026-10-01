@@ -1,10 +1,10 @@
 import { RemoteGeneratePanel } from "./RemoteGeneratePanel";
-import { RemoteServersPanel } from "./RemoteServersPanel";
+import { RemoteWorkersPanel } from "./RemoteWorkersPanel";
 
 // Component names match the settings panels declared in RemoteHeavylifterExtension.GetUIManifest().
 export default {
   components: {
-    RemoteServersPanel,
+    RemoteWorkersPanel,
     RemoteGeneratePanel,
   },
 };

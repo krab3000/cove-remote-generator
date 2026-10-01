@@ -6,7 +6,7 @@ public static class PathFilter
     public static List<string> Normalize(IEnumerable<string>? paths)
         => paths?
             .Where(path => !string.IsNullOrWhiteSpace(path))
-            .Select(PathMapper.Normalize)
+            .Select(NormalizePath)
             .Where(path => path.Length > 0)
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList()
@@ -18,9 +18,12 @@ public static class PathFilter
         if (normalizedFilters.Count == 0)
             return true;
 
-        var candidate = PathMapper.Normalize(candidatePath);
+        var candidate = NormalizePath(candidatePath);
         return normalizedFilters.Any(path =>
             candidate.Equals(path, StringComparison.OrdinalIgnoreCase)
             || candidate.StartsWith(path + "/", StringComparison.OrdinalIgnoreCase));
     }
+
+    /// <summary>Forward slashes, no trailing slash: the form both Cove paths and filter folders are compared in.</summary>
+    public static string NormalizePath(string path) => path.Trim().Replace('\\', '/').TrimEnd('/');
 }

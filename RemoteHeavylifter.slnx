@@ -1,0 +1,7 @@
+<Solution>
+  <Project Path="protocol/RemoteHeavylifter.Protocol/RemoteHeavylifter.Protocol.csproj" />
+  <Project Path="extension/backend/RemoteHeavylifter/RemoteHeavylifter.csproj" />
+  <Project Path="extension/backend/RemoteHeavylifter.Tests/RemoteHeavylifter.Tests.csproj" />
+  <Project Path="worker/RemoteHeavylifter.Worker/RemoteHeavylifter.Worker.csproj" />
+  <Project Path="worker/RemoteHeavylifter.Worker.Tests/RemoteHeavylifter.Worker.Tests.csproj" />
+</Solution>

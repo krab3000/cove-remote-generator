@@ -1,12 +1,11 @@
-# Local end-to-end environment: Cove (all-in-one image) + the generation server, sharing one media folder.
+# Local end-to-end environment: Cove (all-in-one image) + one or two generation workers.
 #
 # Don't start this by hand the first time — run ./setup.ps1 (or ./setup.sh). It builds the extension,
-# installs it into Cove's config, creates sample videos, starts everything and registers the server.
+# installs it into Cove's config, creates sample videos, starts everything and registers the workers.
 #
-# The same folder is mounted at DIFFERENT paths on purpose, so the extension's path mapping is exercised:
-#   Cove:          ./.data/media  ->  /media
-#   heavylifter:   ./.data/media  ->  /mnt/media   (read-only)
-#   heavylifter-2: ./.data/media  ->  /data/library (read-only, only with --profile multi)
+# Workers need no media mounts: they read videos from Cove and upload the results over HTTP.
+#   worker-1: dials Cove (HL_COVE_URL)       -> registered in Cove without a URL
+#   worker-2: listens, Cove dials it (HL_LISTEN_URL) -> registered with ws://worker-2:8750/rpc (only with --profile multi)
 name: heavylifter-local
 
 services:
@@ -29,46 +28,42 @@ services:
       - ./.data/cove/backups:/backups
       - cove-cache:/cache
       - ./.data/media:/media
-    depends_on:
-      heavylifter:
-        condition: service_healthy
 
-  heavylifter:
-    build: ../server
-    image: remote-heavylifter:local
+  worker-1:
+    build:
+      context: ..
+      dockerfile: worker/Dockerfile
+    image: remote-heavylifter-worker:local
     restart: unless-stopped
-    ports:
-      - "${HL_PORT:-8750}:8750"
     environment:
-      HL_API_KEYS: ${HL_API_KEY:?run setup.ps1 / setup.sh first (it writes .env)}
-      HL_MEDIA_ROOTS: /mnt/media
+      # "cove" is a dotless name on Docker's private network, so Cove treats these requests as local.
+      HL_COVE_URL: http://cove:5073
+      HL_WORKER_NAME: worker-1
+      HL_WORKER_TOKEN: ${WORKER1_TOKEN:?run setup.ps1 / setup.sh first (it writes .env)}
       HL_MAX_CONCURRENCY: ${HL_MAX_CONCURRENCY:-2}
-      HL_ARTIFACT_TTL_HOURS: "2"
     volumes:
-      - ./.data/media:/mnt/media:ro
-      - heavylifter-work:/var/lib/heavylifter
+      - worker-1-data:/var/lib/heavylifter
 
-  # A second generation server for distribution / failover testing: `setup -TwoServers` (or --two-servers).
-  heavylifter-2:
+  # A second worker for distribution / failover testing: `setup -TwoServers` (or --two-servers).
+  worker-2:
     profiles: [multi]
-    image: remote-heavylifter:local
+    image: remote-heavylifter-worker:local
     restart: unless-stopped
     ports:
       - "${HL2_PORT:-8751}:8750"
     environment:
-      HL_API_KEYS: ${HL_API_KEY:?run setup.ps1 / setup.sh first (it writes .env)}
-      HL_MEDIA_ROOTS: /data/library
+      HL_LISTEN_URL: http://0.0.0.0:8750
+      HL_WORKER_NAME: worker-2
+      HL_WORKER_TOKEN: ${WORKER2_TOKEN:?run setup.ps1 / setup.sh first (it writes .env)}
       HL_MAX_CONCURRENCY: ${HL_MAX_CONCURRENCY:-2}
-      HL_ARTIFACT_TTL_HOURS: "2"
     volumes:
-      - ./.data/media:/data/library:ro
-      - heavylifter-2-work:/var/lib/heavylifter
+      - worker-2-data:/var/lib/heavylifter
     depends_on:
-      heavylifter:
+      worker-1:
         condition: service_started
 
 volumes:
   cove-pgdata:
   cove-cache:
-  heavylifter-work:
-  heavylifter-2-work:
+  worker-1-data:
+  worker-2-data:
