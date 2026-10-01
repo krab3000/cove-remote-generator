@@ -48,6 +48,7 @@ public sealed class RunCounters
 internal sealed class RunExecutor(
     IWorkerDirectory workers,
     WorkerAccess access,
+    IFingerprintStore fingerprints,
     string extensionId,
     CoordinatorTimings timings,
     TimeProvider time,
@@ -194,7 +195,7 @@ internal sealed class RunExecutor(
                 return;
             }
 
-            var errors = Collect(item, assignment, result);
+            var errors = await CollectAsync(item, assignment, result);
             Finish(item, slot,
                 errors.Count == 0 ? JobUnitOutcome.Succeeded : JobUnitOutcome.Failed,
                 errors.Count == 0 ? null : $"{slot.Name}: {string.Join("; ", errors)}");
@@ -248,11 +249,12 @@ internal sealed class RunExecutor(
                 ? new PreviewSpec(preview.Segments, preview.SegmentDuration, preview.ExcludeStart, preview.ExcludeEnd,
                     preview.Preset, preview.Audio, PreviewSettings.Crf, PreviewSettings.Width, item.PreviewScale)
                 : null,
-            item.Sprite ? new SpriteSpec(SpriteSettings.MaxFrames, item.SpriteWidth, item.SpriteFilter, GeneratedPaths.SpriteFileName(item.VideoId)) : null);
+            item.Sprite ? new SpriteSpec(SpriteSettings.MaxFrames, item.SpriteWidth, item.SpriteFilter, GeneratedPaths.SpriteFileName(item.VideoId)) : null,
+            item.Phash ? new PhashSpec() : null);
     }
 
     /// <summary>Commit every requested artifact the worker produced and uploaded. Returns what is missing.</summary>
-    private List<string> Collect(WorkItem item, TaskAssignment assignment, TaskResult result)
+    private async Task<List<string>> CollectAsync(WorkItem item, TaskAssignment assignment, TaskResult result)
     {
         var errors = new List<string>();
         var paths = _run.Paths;
@@ -281,6 +283,14 @@ internal sealed class RunExecutor(
                 errors.Add(error);
             else
                 ArtifactCommitter.CommitSpritePair(sprite, vtt, paths.Sprite(id), paths.SpriteVtt(id), _run.Overwrite);
+        }
+
+        if (item.Phash)
+        {
+            if (result.Artifacts.TryGetValue(ArtifactKinds.Phash, out var phash) && phash is { Succeeded: true, Value: { Length: > 0 } value })
+                await fingerprints.SavePhashAsync(item.FileId, value, _token);
+            else
+                errors.Add($"phash failed{(phash?.Error is { Length: > 0 } reason ? $" ({reason})" : "")}");
         }
 
         return errors;

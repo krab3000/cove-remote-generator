@@ -10,10 +10,12 @@ public sealed record GenerateRequest
     public bool Cover { get; init; } = true;
     public bool Preview { get; init; } = true;
     public bool Sprite { get; init; } = true;
+    /// <summary>Video perceptual hash (Cove's "phash" fingerprint), stored on the video's primary file.</summary>
+    public bool Phash { get; init; }
     public bool Overwrite { get; init; }
     public int SpriteWidth { get; init; } = SpriteSettings.DefaultWidth;
 
-    public bool AnyArtifact => Cover || Preview || Sprite;
+    public bool AnyArtifact => Cover || Preview || Sprite || Phash;
 }
 
 /// <summary>Sprite tile width. Cove's own generator uses 160; the web UI scales any tile width from the VTT.</summary>
@@ -52,6 +54,7 @@ public sealed class WorkItem
     public bool Cover { get; init; }
     public bool Preview { get; init; }
     public bool Sprite { get; init; }
+    public bool Phash { get; init; }
     public string? CoverFilter { get; init; }
     public string? PreviewScale { get; init; }
     public string? SpriteFilter { get; init; }
@@ -59,6 +62,8 @@ public sealed class WorkItem
 
     /// <summary>The source as this machine opens it (native path); workers read it over HTTP from Cove.</summary>
     public required string SourcePath { get; init; }
+    /// <summary>The primary file's id; the phash is stored against it.</summary>
+    public int FileId { get; init; }
     public long SourceSize { get; init; }
 
     public int Attempts { get; set; }

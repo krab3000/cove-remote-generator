@@ -15,7 +15,7 @@ public interface ITaskReporter
 
 /// <summary>
 /// Runs submitted tasks, at most <see cref="WorkerOptions.MaxConcurrency"/> at once across all Cove sessions. A task
-/// reads its source from Cove over HTTP, generates cover → preview → sprite in turn (a failed step does not stop the
+/// reads its source from Cove over HTTP, generates cover → preview → sprite → phash in turn (a failed step does not stop the
 /// next), uploads each artifact as it is done, and reports the result. Nothing outlives the task: scratch is deleted
 /// and the task is cancelled if its session goes away.
 /// </summary>
@@ -26,6 +26,7 @@ public sealed class TaskRunner(WorkerOptions options, WorkerToken token, CoveHtt
         [ArtifactKinds.Cover] = 1.0,
         [ArtifactKinds.Preview] = 4.0,
         [ArtifactKinds.Sprite] = 3.0,
+        [ArtifactKinds.Phash] = 2.0,
     };
 
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _running = new(StringComparer.Ordinal);
@@ -97,6 +98,7 @@ public sealed class TaskRunner(WorkerOptions options, WorkerToken token, CoveHtt
         if (request.Cover is not null) steps.Add(ArtifactKinds.Cover);
         if (request.Preview is not null) steps.Add(ArtifactKinds.Preview);
         if (request.Sprite is not null) steps.Add(ArtifactKinds.Sprite);
+        if (request.Phash is not null) steps.Add(ArtifactKinds.Phash);
         var total = steps.Sum(s => Weights[s]);
         var done = 0.0;
 
@@ -137,6 +139,12 @@ public sealed class TaskRunner(WorkerOptions options, WorkerToken token, CoveHtt
                             await SpriteGenerator.GenerateAsync(options.Media, source, duration, request.Sprite!, stepDir, sprite, vtt, ct, logger);
                             artifacts[ArtifactKinds.Sprite] = await UploadAsync(request, ArtifactKinds.Sprite, sprite, ct);
                             artifacts[ArtifactKinds.Vtt] = await UploadAsync(request, ArtifactKinds.Vtt, vtt, ct);
+                            break;
+                        }
+                        case ArtifactKinds.Phash:
+                        {
+                            var phash = await PhashGenerator.GenerateAsync(options.Media, source, duration, request.Phash!, stepDir, ct, logger);
+                            artifacts[step] = new ArtifactResult(ArtifactStates.Succeeded, null, null, null, phash);
                             break;
                         }
                     }

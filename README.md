@@ -51,6 +51,12 @@ It has three parts:
   - Cover: taken at 20% of the duration, `-q:v 2`.
   - Preview: Cove's preview segments, segment duration, start/end exclusions, preset and audio settings, encoded as H.264 crf 21, high profile, level 4.2, width 640.
   - Sprite: up to 81 frames at 160 px, with gap filling and JPEG quality 75.
+  - Perceptual hash (phash) is Cove's video phash, which is Stash's and goimagehash's:
+    - 25 frames at 160 px, taken evenly over the middle 90% of the video;
+    - laid out in a 5×5 grid and hashed with the 64×64 DCT;
+    - no hash at all if any frame fails to decode.
+
+    It is stored as the primary file's `phash` fingerprint. A video counts as hashed when any of its files has one, the same rule Cove uses. On the local test library, the remote hashes are bit-for-bit identical to the ones Cove computes.
   - VR videos get Cove's one-eye flat reprojection.
 - **Parity pinning.** Expected values derived from Cove's source live in [contract/parity/cove-parity.json](contract/parity/cove-parity.json) and are checked by both test suites.
 
@@ -72,7 +78,59 @@ docker run -d --name hl-worker -p 8750:8750 -v hl-worker-data:/var/lib/heavylift
 
 Keep the data volume: it holds the worker's token, which is its identity.
 
-Without Docker, `scripts/package-worker.sh` builds self-contained binaries (`linux-x64`, `linux-arm64`, `osx-arm64`, `win-x64`). Install ffmpeg/ffprobe separately, or point `HL_FFMPEG` / `HL_FFPROBE` at them.
+### Without Docker
+
+You need ffmpeg and ffprobe, either on `PATH` or given with `HL_FFMPEG` / `HL_FFPROBE`:
+
+| OS | Install ffmpeg |
+|---|---|
+| macOS | `brew install ffmpeg` |
+| Debian/Ubuntu | `sudo apt install ffmpeg` |
+| Windows | `winget install Gyan.FFmpeg` |
+
+Hardware encoding (`HL_H264_ENCODER=h264_nvenc` and so on) needs an ffmpeg build that includes it.
+
+**From source** (needs the .NET 10 SDK):
+
+```sh
+# The worker connects to Cove:
+HL_COVE_URL=http://192.168.1.10:5073 HL_WORKER_NAME=my-laptop \
+  dotnet run --project worker/RemoteHeavylifter.Worker -c Release
+```
+
+```powershell
+# Windows (PowerShell)
+$env:HL_COVE_URL = "http://192.168.1.10:5073"; $env:HL_WORKER_NAME = "my-pc"
+dotnet run --project worker/RemoteHeavylifter.Worker -c Release
+```
+
+**As a standalone binary.** No .NET is needed on the target machine:
+
+1. Build:
+   ```sh
+   scripts/package-worker.sh osx-arm64          # or linux-x64, linux-arm64, win-x64; no argument builds all four
+   ```
+   The binaries go to `artifacts/worker/<rid>/`, and a zip is written to `artifacts/remote-heavylifter-worker-<version>-<rid>.zip`.
+2. Copy the binary to the worker machine and run it there:
+   ```sh
+   HL_COVE_URL=http://192.168.1.10:5073 HL_WORKER_NAME=gpu-box HL_DATA_DIR=~/.heavylifter \
+     ./RemoteHeavylifter.Worker
+   ```
+   Use `RemoteHeavylifter.Worker.exe` on Windows. On macOS, a binary copied from another machine may first need `xattr -d com.apple.quarantine RemoteHeavylifter.Worker`.
+
+**What happens on startup:**
+
+- The worker prints its **worker ID**, for example `worker ID TJILXX6ZUKTD (token from ./data/worker.token (new))`.
+- It then waits until you **Trust** that ID in Cove (Settings → Remote Generation → Pending workers), retrying every 10 s.
+- The token lives in `HL_DATA_DIR` (default `./data`, relative to the current directory). Run the worker from the same place, or set `HL_DATA_DIR`, so it keeps the same identity.
+- Deleting `worker.token` makes it a new, untrusted worker.
+
+**To let Cove connect to the worker instead,** set `HL_LISTEN_URL=http://0.0.0.0:8750` (instead of, or as well as, `HL_COVE_URL`). Then add the worker in Cove with:
+
+- its URL, `ws://<worker-ip>:8750/rpc`;
+- its token, the contents of `worker.token` or the `HL_WORKER_TOKEN` you set.
+
+Stop the worker with Ctrl+C. Tasks it was running are re-queued by Cove on another worker.
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -136,6 +194,6 @@ The extension builds against the published Cove.Sdk NuGet package by default; pa
 
 - **Duplicated Cove internals.** The generated-file layout and ffmpeg arguments are copies of private Cove code, pinned by the parity fixtures to Cove commit `f4cd955e`. Re-check them when Cove changes its generator.
 - **No shared lock with Cove.** Cove's per-video generation lock is not available to extensions. Don't run Cove's own Generate task over the same videos at the same time. Commits are atomic renames, but the last writer wins.
-- **Out of scope:** segment thumbnails and previews, stereo VR cards and previews, and phash/MD5.
+- **Out of scope:** segment thumbnails and previews, stereo VR cards and previews, and MD5 checksums.
 - **Worker tokens** of workers Cove dials are stored in Cove's extension data table. They are never returned to the browser, but they are not encrypted at rest. Workers that dial in are stored as a hash only.
 - **Tokens on the worker's command line.** ffmpeg receives the worker token as a `-headers` argument, so it is visible in the worker machine's process list.

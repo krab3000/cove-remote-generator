@@ -40,6 +40,8 @@ internal sealed class FakeWorker(string name, WorkerAccess access, int capacity 
 
     public static string Content(string kind, int videoId) => $"{kind}-{videoId}";
 
+    public static string Phash(int videoId) => $"abc{videoId:x}";
+
     public async Task<TaskResult> RunTaskAsync(TaskRequest request, Action<TaskProgress>? progress, CancellationToken ct)
     {
         if (Down)
@@ -76,6 +78,12 @@ internal sealed class FakeWorker(string name, WorkerAccess access, int capacity 
             var (status, code, failed) = Behavior(request);
             var assignment = access.Get(request.TaskId) ?? throw new InvalidOperationException("task was not assigned");
             var artifacts = new Dictionary<string, ArtifactResult>();
+            if (request.Phash is not null)
+            {
+                artifacts[ArtifactKinds.Phash] = status == TaskStates.Failed || failed.Contains(ArtifactKinds.Phash)
+                    ? new ArtifactResult(ArtifactStates.Failed, null, null, "phash broke")
+                    : new ArtifactResult(ArtifactStates.Succeeded, null, null, null, Phash(request.VideoId));
+            }
             foreach (var kind in request.UploadUrls.Keys)
             {
                 if (status == TaskStates.Failed || failed.Contains(kind))
@@ -102,6 +110,17 @@ internal sealed class FakeWorker(string name, WorkerAccess access, int capacity 
     public Task<ProbeResult> ProbeAsync(ProbeParams request, CancellationToken ct) => Task.FromResult(new ProbeResult(true, 1, null));
 
     public Task<WorkerInfo> RefreshInfoAsync(CancellationToken ct) => Task.FromResult(Info);
+}
+
+internal sealed class RecordingFingerprints : IFingerprintStore
+{
+    public readonly ConcurrentDictionary<int, string> Phashes = new();
+
+    public Task SavePhashAsync(int fileId, string phash, CancellationToken ct)
+    {
+        Phashes[fileId] = phash;
+        return Task.CompletedTask;
+    }
 }
 
 internal sealed class FakeDirectory(params FakeWorker[] workers) : IWorkerDirectory
@@ -155,6 +174,7 @@ public sealed class RunExecutorTests : IDisposable
     private readonly string _root = Directory.CreateTempSubdirectory("rh-run-").FullName;
     private readonly GeneratedPaths _paths;
     private readonly WorkerAccess _access = new(new WorkerRegistry(new StoreHolder()));
+    private readonly RecordingFingerprints _fingerprints = new();
 
     public RunExecutorTests() => _paths = new GeneratedPaths(_root);
 
@@ -169,6 +189,7 @@ public sealed class RunExecutorTests : IDisposable
             Label = $"video {id}",
             CovePath = $"/cove/v{id}.mp4",
             SourcePath = $"/cove/v{id}.mp4",
+            FileId = 100 + id,
             SourceSize = 1000,
             Duration = 60,
             Cover = true,
@@ -181,7 +202,7 @@ public sealed class RunExecutorTests : IDisposable
     private async Task<(RecordingProgress Progress, RunCounters Counters, IReadOnlyDictionary<string, int> PerWorker)> RunAsync(
         IReadOnlyList<WorkItem> items, bool overwrite, CancellationToken ct, params (FakeWorker Worker, int Slots)[] workers)
     {
-        var executor = new RunExecutor(new FakeDirectory(workers.Select(w => w.Worker).ToArray()), _access, "ext.test",
+        var executor = new RunExecutor(new FakeDirectory(workers.Select(w => w.Worker).ToArray()), _access, _fingerprints, "ext.test",
             Fast, TimeProvider.System, NullLogger.Instance);
         var progress = new RecordingProgress();
         var counters = new RunCounters { Total = items.Count };
@@ -375,5 +396,51 @@ public sealed class RunExecutorTests : IDisposable
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
         Assert.Equal(2, a.Cancelled.Count);
         Assert.All(a.Requests, r => Assert.Null(_access.Get(r.TaskId)));
+    }
+
+    private static List<WorkItem> PhashOnly(int count) => Items(count).Select(item => new WorkItem
+    {
+        VideoId = item.VideoId,
+        Label = item.Label,
+        CovePath = item.CovePath,
+        SourcePath = item.SourcePath,
+        FileId = item.FileId,
+        Duration = item.Duration,
+        Phash = true,
+    }).ToList();
+
+    [Fact]
+    public async Task A_phash_is_stored_on_the_primary_file_and_needs_no_upload()
+    {
+        var a = Worker("a");
+        var (_, counters, _) = await RunAsync(PhashOnly(3), false, TestContext.Current.CancellationToken, (a, 2));
+
+        Assert.Equal(3, counters.Succeeded);
+        Assert.All(a.Requests, r =>
+        {
+            Assert.Equal(new PhashSpec(25, 160), r.Phash);
+            Assert.Empty(r.UploadUrls);
+        });
+        for (var id = 1; id <= 3; id++)
+            Assert.Equal(FakeWorker.Phash(id), _fingerprints.Phashes[100 + id]);
+        Assert.False(File.Exists(_paths.Cover(1)));
+    }
+
+    [Fact]
+    public async Task A_failed_phash_fails_the_video_and_stores_nothing()
+    {
+        var a = Worker("a");
+        a.Behavior = _ => (TaskStates.Partial, null, [ArtifactKinds.Phash]);
+        var items = Items(1).Select(item => new WorkItem
+        {
+            VideoId = item.VideoId, Label = item.Label, CovePath = item.CovePath, SourcePath = item.SourcePath, FileId = item.FileId,
+            Duration = item.Duration, Cover = true, Phash = true,
+        }).ToList();
+        var (progress, counters, _) = await RunAsync(items, false, TestContext.Current.CancellationToken, (a, 1));
+
+        Assert.Equal(1, counters.Failed);
+        Assert.Contains("phash failed (phash broke)", progress.Units["1"].Message);
+        Assert.True(File.Exists(_paths.Cover(1)));
+        Assert.Empty(_fingerprints.Phashes);
     }
 }

@@ -61,11 +61,22 @@ public sealed class SelectionPredicateTests
         var existing = new HashSet<string> { Paths.Cover(1), Paths.Preview(1), Paths.Sprite(1) };
         var needs = VideoWorkSelector.Needs(new GenerateRequest(), 1, null, Paths, existing.Contains);
         // The sprite only counts as present with its VTT.
-        Assert.Equal((false, false, true), needs);
+        Assert.Equal((false, false, true, false), needs);
 
         existing.Add(Paths.SpriteVtt(1));
         Assert.Null(VideoWorkSelector.Needs(new GenerateRequest(), 1, null, Paths, existing.Contains));
-        Assert.Equal((true, true, true), VideoWorkSelector.Needs(new GenerateRequest { Overwrite = true }, 1, null, Paths, existing.Contains));
+        Assert.Equal((true, true, true, false), VideoWorkSelector.Needs(new GenerateRequest { Overwrite = true }, 1, null, Paths, existing.Contains));
+    }
+
+    [Fact]
+    public void A_phash_is_only_redone_when_overwriting()
+    {
+        var request = new GenerateRequest { Cover = false, Preview = false, Sprite = false, Phash = true };
+        Assert.Equal((false, false, false, true), VideoWorkSelector.Needs(request, 1, null, Paths, _ => false, hasPhash: false));
+        Assert.Null(VideoWorkSelector.Needs(request, 1, null, Paths, _ => false, hasPhash: true));
+        Assert.Equal((false, false, false, true),
+            VideoWorkSelector.Needs(request with { Overwrite = true }, 1, null, Paths, _ => false, hasPhash: true));
+        Assert.True(request.AnyArtifact);
     }
 }
 

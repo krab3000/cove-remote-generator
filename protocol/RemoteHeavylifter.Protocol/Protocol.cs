@@ -85,6 +85,10 @@ public static class ArtifactKinds
     public const string Sprite = "sprite";
     public const string Vtt = "vtt";
 
+    /// <summary>A value, not a file: reported in <see cref="ArtifactResult.Value"/> and never uploaded.</summary>
+    public const string Phash = "phash";
+
+    /// <summary>The kinds that are files uploaded to Cove.</summary>
     public static readonly IReadOnlyList<string> All = [Cover, Preview, Sprite, Vtt];
 }
 
@@ -128,6 +132,13 @@ public sealed record PreviewSpec(
 
 public sealed record SpriteSpec(int MaxFrames, int FrameWidth, string? PreFilter, string SpriteFilename);
 
+/// <summary>
+/// Cove's video perceptual hash: <see cref="FrameCount"/> frames (a square grid) at <see cref="FrameWidth"/> px, sampled
+/// evenly over the middle 90% of the video, hashed with goimagehash's DCT pHash. The defaults are Cove's (and Stash's);
+/// changing them produces hashes that match nothing Cove computed.
+/// </summary>
+public sealed record PhashSpec(int FrameCount = 25, int FrameWidth = 160);
+
 /// <summary>One video to generate. URLs are absolute; the worker sends its token with every request to them.</summary>
 public sealed record TaskRequest(
     string TaskId,
@@ -138,11 +149,13 @@ public sealed record TaskRequest(
     IReadOnlyDictionary<string, string> UploadUrls,
     CoverSpec? Cover,
     PreviewSpec? Preview,
-    SpriteSpec? Sprite);
+    SpriteSpec? Sprite,
+    PhashSpec? Phash = null);
 
 public sealed record TaskProgress(string TaskId, double Progress, string? Stage);
 
-public sealed record ArtifactResult(string Status, long? Size, string? Sha256, string? Error)
+/// <param name="Value">For value kinds such as <see cref="ArtifactKinds.Phash"/>: the result itself.</param>
+public sealed record ArtifactResult(string Status, long? Size, string? Sha256, string? Error, string? Value = null)
 {
     public bool Succeeded => Status == ArtifactStates.Succeeded;
 }

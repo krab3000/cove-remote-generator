@@ -75,6 +75,8 @@ export interface GenerateOptions {
   cover: boolean;
   preview: boolean;
   sprite: boolean;
+  /** Video perceptual hash (Cove's "phash" fingerprint); older stored options may lack it. */
+  phash?: boolean;
   overwrite: boolean;
   /** Sprite tile width in px; older stored options may lack it. */
   spriteWidth?: number;

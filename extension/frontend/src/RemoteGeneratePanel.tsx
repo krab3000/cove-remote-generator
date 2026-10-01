@@ -6,7 +6,7 @@ import { ApiError, SPRITE_WIDTH, api, queryKeys, type GenerateOptions } from "./
 import { FolderTree } from "./FolderTree";
 import { Button, Checkbox, ExpandableCard, Message, RunButton, Section, StateBadge, describeLoad, inputClass } from "./ui";
 
-type Artifacts = Pick<GenerateOptions, "cover" | "preview" | "sprite" | "overwrite">;
+type Artifacts = Required<Pick<GenerateOptions, "cover" | "preview" | "sprite" | "phash" | "overwrite">>;
 
 export function RemoteGeneratePanel() {
   const queryClient = useQueryClient();
@@ -18,7 +18,7 @@ export function RemoteGeneratePanel() {
     refetchInterval: 10_000,
   });
 
-  const [artifacts, setArtifacts] = useState<Artifacts>({ cover: true, preview: true, sprite: true, overwrite: false });
+  const [artifacts, setArtifacts] = useState<Artifacts>({ cover: true, preview: true, sprite: true, phash: false, overwrite: false });
   // Kept as text so the field can be cleared and retyped; parsed on submit.
   const [spriteWidthText, setSpriteWidthText] = useState(String(SPRITE_WIDTH.default));
   const [paths, setPaths] = useState<string[]>([]);
@@ -34,7 +34,7 @@ export function RemoteGeneratePanel() {
   useEffect(() => {
     if (initialized || !optionsQuery.data || !healthQuery.data) return;
     const last = optionsQuery.data;
-    setArtifacts({ cover: last.cover, preview: last.preview, sprite: last.sprite, overwrite: last.overwrite });
+    setArtifacts({ cover: last.cover, preview: last.preview, sprite: last.sprite, phash: last.phash ?? false, overwrite: last.overwrite });
     setSpriteWidthText(String(last.spriteWidth ?? SPRITE_WIDTH.default));
     setPaths(last.paths ?? []);
     const remembered = (last.workerIds ?? []).filter((id) => liveIds.has(id));
@@ -43,7 +43,7 @@ export function RemoteGeneratePanel() {
   }, [initialized, optionsQuery.data, healthQuery.data, liveIds]);
 
   const selectedLive = [...selected].filter((id) => liveIds.has(id));
-  const anyArtifact = artifacts.cover || artifacts.preview || artifacts.sprite;
+  const anyArtifact = artifacts.cover || artifacts.preview || artifacts.sprite || artifacts.phash;
   const spriteWidth = /^\d+$/.test(spriteWidthText.trim()) ? Number(spriteWidthText.trim()) : NaN;
   const spriteWidthValid = spriteWidth >= SPRITE_WIDTH.min && spriteWidth <= SPRITE_WIDTH.max;
   const roots = (config?.covePaths ?? [])
@@ -107,7 +107,7 @@ export function RemoteGeneratePanel() {
     <Section title="Generate">
       <ExpandableCard
         label="Remote generate"
-        description="Generate video covers, previews and sprite sheets on the selected workers. Files land in Cove's generated folder exactly where Cove's own generate task puts them."
+        description="Generate video covers, previews, sprite sheets and perceptual hashes on the selected workers. Files land in Cove's generated folder and hashes in its database, exactly where Cove's own generate task puts them."
         actions={<RunButton onRun={() => run.mutate()} isPending={run.isPending} disabled={blocker !== null} />}
         expanded={expanded}
         onToggleExpand={() => setExpanded((open) => !open)}
@@ -120,6 +120,12 @@ export function RemoteGeneratePanel() {
               <Checkbox label="Covers / screenshots" checked={artifacts.cover} onChange={(cover) => setArtifacts({ ...artifacts, cover })} />
               <Checkbox label="Video previews" checked={artifacts.preview} onChange={(preview) => setArtifacts({ ...artifacts, preview })} />
               <Checkbox label="Sprite sheets" checked={artifacts.sprite} onChange={(sprite) => setArtifacts({ ...artifacts, sprite })} />
+              <Checkbox
+                label="Perceptual hashes"
+                checked={artifacts.phash}
+                onChange={(phash) => setArtifacts({ ...artifacts, phash })}
+                title="Video phash for duplicate detection, computed exactly as Cove computes it"
+              />
             </div>
             <div className="space-y-1">
               <label className="flex flex-wrap items-center gap-2 text-sm text-secondary">

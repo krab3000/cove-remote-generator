@@ -14,19 +14,22 @@ public sealed class VideoWorkSelector(DbContext db)
     private const int PageSize = 500;
 
     /// <summary>Which of the requested artifacts a video still needs; null when it needs none.</summary>
-    public static (bool Cover, bool Preview, bool Sprite)? Needs(
+    /// <param name="hasPhash">Any of the video's files already has a phash (Cove's own rule for "has one").</param>
+    public static (bool Cover, bool Preview, bool Sprite, bool Phash)? Needs(
         GenerateRequest request,
         int videoId,
         string? imageBlobId,
         GeneratedPaths paths,
-        Func<string, bool> exists)
+        Func<string, bool> exists,
+        bool hasPhash = false)
     {
         var cover = request.Cover && string.IsNullOrWhiteSpace(imageBlobId)
             && (request.Overwrite || !exists(paths.Cover(videoId)));
         var preview = request.Preview && (request.Overwrite || !exists(paths.Preview(videoId)));
         var sprite = request.Sprite
             && (request.Overwrite || !(exists(paths.Sprite(videoId)) && exists(paths.SpriteVtt(videoId))));
-        return cover || preview || sprite ? (cover, preview, sprite) : null;
+        var phash = request.Phash && (request.Overwrite || !hasPhash);
+        return cover || preview || sprite || phash ? (cover, preview, sprite, phash) : null;
     }
 
     public async Task<SelectionResult> SelectAsync(
@@ -90,6 +93,21 @@ public sealed class VideoWorkSelector(DbContext db)
                 })
                 .ToDictionaryAsync(file => file.Id, ct);
 
+            // Cove counts a video as hashed when any of its files has a phash, not just the primary one.
+            var hashed = new HashSet<int>();
+            if (request.Phash)
+            {
+                var pageIds = page.Select(v => v.Id).ToList();
+                hashed = (await db.Set<VideoFile>()
+                        .AsNoTracking()
+                        .Where(file => file.VideoId != null && pageIds.Contains(file.VideoId.Value))
+                        .Where(file => db.Set<FileFingerprint>().Any(fp => fp.FileId == file.Id && fp.Type == FingerprintTypes.Phash && fp.Value != ""))
+                        .Select(file => file.VideoId!.Value)
+                        .Distinct()
+                        .ToListAsync(ct))
+                    .ToHashSet();
+            }
+
             foreach (var video in page)
             {
                 if (video.PrimaryFileId is not { } fileId || !files.TryGetValue(fileId, out var file))
@@ -98,9 +116,9 @@ public sealed class VideoWorkSelector(DbContext db)
                     continue;
 
                 examined++;
-                if (Needs(request, video.Id, video.ImageBlobId, paths, File.Exists) is not { } needs)
+                if (Needs(request, video.Id, video.ImageBlobId, paths, File.Exists, hashed.Contains(video.Id)) is not { } needs)
                     continue;
-                var (cover, preview, sprite) = needs;
+                var (cover, preview, sprite, phash) = needs;
 
                 var label = string.IsNullOrWhiteSpace(video.Title) ? file.Basename : video.Title!;
                 var sourcePath = FilesystemPaths.ToNativePath(file.Path);
@@ -129,11 +147,13 @@ public sealed class VideoWorkSelector(DbContext db)
                     Cover = cover,
                     Preview = preview,
                     Sprite = sprite,
+                    Phash = phash,
                     CoverFilter = VrFilter.OneEyeFlat(vr, 1920),
                     PreviewScale = VrFilter.OneEyeFlat(vr, PreviewSettings.Width) ?? $"scale={PreviewSettings.Width}:-2",
                     SpriteFilter = VrFilter.OneEyeFlat(vr, spriteWidth),
                     SpriteWidth = spriteWidth,
                     SourcePath = sourcePath,
+                    FileId = file.Id,
                     SourceSize = file.Size,
                 });
             }

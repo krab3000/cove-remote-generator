@@ -41,6 +41,7 @@ public sealed class RemoteHeavylifterExtension : JobExtensionBase, IApiExtension
         services.AddSingleton<WorkerSettingsStore>();
         services.AddSingleton<WorkerAccess>();
         services.AddSingleton<WorkerHub>();
+        services.AddSingleton<IFingerprintStore, FingerprintStore>();
         services.AddSingleton<GenerationOptionsStore>();
         services.AddSingleton(CoordinatorTimings.Default);
         services.AddSingleton(sp => new GenerationCoordinator(
@@ -48,6 +49,7 @@ public sealed class RemoteHeavylifterExtension : JobExtensionBase, IApiExtension
             sp.GetRequiredService<WorkerHub>(),
             sp.GetRequiredService<WorkerSettingsStore>(),
             sp.GetRequiredService<WorkerAccess>(),
+            sp.GetRequiredService<IFingerprintStore>(),
             ExtensionId,
             sp.GetRequiredService<IExtensionServiceScopeFactory>(),
             sp.GetRequiredService<Cove.Core.Interfaces.CoveConfiguration>(),

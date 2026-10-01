@@ -80,5 +80,34 @@
     { "videoId": 42, "bucket": "e8" },
     { "videoId": 123, "bucket": "a5" },
     { "videoId": 100000, "bucket": "1f" }
-  ]
+  ],
+  "phash": {
+    "source": "yourcove/cove src/Cove.Api/Services/FingerprintService.cs (ComputePerceptionHash, BuildSpritePhash), run on the images below via reflection",
+    "images": [
+      {
+        "kind": 0,
+        "width": 800,
+        "height": 450,
+        "expected": "a001d401ab7efb7e"
+      },
+      {
+        "kind": 1,
+        "width": 800,
+        "height": 450,
+        "expected": "c2161750fba8b9f8"
+      },
+      {
+        "kind": 2,
+        "width": 800,
+        "height": 340,
+        "expected": "d551555555555555"
+      }
+    ],
+    "grid": {
+      "frames": 25,
+      "frameWidth": 160,
+      "frameHeight": 90,
+      "expected": "b880822b7f5d750f"
+    }
+  }
 }

@@ -14,6 +14,7 @@ public sealed class GenerationCoordinator(
     WorkerHub hub,
     WorkerSettingsStore settingsStore,
     WorkerAccess access,
+    IFingerprintStore fingerprints,
     string extensionId,
     IExtensionServiceScopeFactory scopes,
     CoveConfiguration config,
@@ -78,7 +79,7 @@ public sealed class GenerationCoordinator(
         IReadOnlyDictionary<string, int> perWorker;
         try
         {
-            var executor = new RunExecutor(hub, access, extensionId, timings, time, logger);
+            var executor = new RunExecutor(hub, access, fingerprints, extensionId, timings, time, logger);
             perWorker = await executor.ExecuteAsync(live, selection.Work, run, progress, counters, token);
         }
         finally
