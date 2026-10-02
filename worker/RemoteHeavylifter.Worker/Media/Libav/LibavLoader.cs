@@ -23,7 +23,9 @@ public static class LibavLoader
     private static string _failure = "";
 
     /// <summary>Where to look: <paramref name="configured"/> (HL_FFMPEG_LIBS), the bundled <c>ffmpeg</c> folder next to
-    /// the worker (flat on Windows, <c>ffmpeg/lib</c> on Linux; scripts/fetch-ffmpeg.sh), then /opt/ffmpeg/lib (Docker).</summary>
+    /// the worker (flat on Windows, <c>ffmpeg/lib</c> on Linux; scripts/fetch-ffmpeg.sh), /opt/ffmpeg/lib (Docker), and
+    /// on macOS Homebrew's ffmpeg (Apple Silicon, then Intel prefix): BtbN has no macOS builds, and Homebrew's has
+    /// VideoToolbox. A Homebrew FFmpeg of another major version is found too, and then rejected by the version check.</summary>
     public static IEnumerable<string> Candidates(string? configured)
     {
         if (!string.IsNullOrWhiteSpace(configured))
@@ -31,6 +33,11 @@ public static class LibavLoader
         yield return Path.Combine(AppContext.BaseDirectory, "ffmpeg");
         yield return Path.Combine(AppContext.BaseDirectory, "ffmpeg", "lib");
         yield return "/opt/ffmpeg/lib";
+        if (OperatingSystem.IsMacOS())
+        {
+            yield return "/opt/homebrew/opt/ffmpeg/lib";
+            yield return "/usr/local/opt/ffmpeg/lib";
+        }
     }
 
     /// <summary>The file name of one library on this platform, e.g. avcodec-63.dll.</summary>

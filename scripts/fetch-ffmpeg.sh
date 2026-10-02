@@ -18,7 +18,7 @@ case "$rid" in
   linux-x64) asset="ffmpeg-n$branch-latest-linux64-gpl-shared-$branch.tar.xz" ;;
   linux-arm64) asset="ffmpeg-n$branch-latest-linuxarm64-gpl-shared-$branch.tar.xz" ;;
   *)
-    echo "No BtbN FFmpeg build for $rid: that worker needs HL_FFMPEG_LIBS (FFmpeg $branch shared libraries) or uses the ffmpeg command line." >&2
+    echo "No BtbN FFmpeg build for $rid: that worker uses Homebrew's ffmpeg on macOS (brew install ffmpeg), or HL_FFMPEG_LIBS (FFmpeg $branch shared libraries), else the ffmpeg command line." >&2
     exit 0 ;;
 esac
 

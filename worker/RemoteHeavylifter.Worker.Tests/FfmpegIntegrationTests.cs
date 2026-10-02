@@ -84,8 +84,10 @@ public class FfmpegIntegrationTests(ClipFixture clips) : IClassFixture<ClipFixtu
     [Fact]
     public async Task SpriteAndCoverWithCudaDecoding()
     {
-        // Without an NVIDIA GPU ffmpeg itself falls back to software decoding, so this passes either way.
+        // Without an NVIDIA GPU a CUDA-enabled ffmpeg falls back to software decoding, so this passes either way;
+        // a build without CUDA at all (Homebrew's on macOS) rejects -hwaccel cuda, so there is nothing to test.
         Ffmpeg.RequireOrSkip();
+        Assert.SkipUnless((await MediaProbe.HwAccelsAsync(MediaContext.Default, Ct)).Contains("cuda"), "this ffmpeg has no cuda hwaccel");
         using var tmp = new TempDir();
         var source = Specs.Local(clips.Clip30).WithHardwareDecode("cuda", null);
         string sprite = tmp["s.jpg"], vtt = tmp["t.vtt"];
