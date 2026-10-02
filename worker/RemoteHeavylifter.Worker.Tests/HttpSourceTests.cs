@@ -71,7 +71,7 @@ public class HttpSourceTests(ClipFixture clips) : IClassFixture<ClipFixture>
         await using var host = await CacheHost.StartAsync(1 << 30);
         using (var cached = await host.Cache.OpenAsync(cove.Url, size, Ct))
         {
-            var source = MediaSource.ForLocal(cached!.LocalUrl, size);
+            var source = MediaSource.ForCache(cached!.LocalUrl, size);
             await CoverGenerator.GenerateAsync(ctx, source, 30, Specs.Cover(), tmp["c"], tmp["c.jpg"], Ct);
             var afterCover = cached.Stats;
             await SpriteGenerator.GenerateAsync(ctx, source, 30, Specs.Sprite("9_sprite.jpg"), tmp["c"], tmp["c_s.jpg"], tmp["c.vtt"], Ct);

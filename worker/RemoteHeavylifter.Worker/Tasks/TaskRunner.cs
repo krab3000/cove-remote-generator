@@ -17,7 +17,8 @@ public interface ITaskReporter
 
 /// <summary>
 /// Runs submitted tasks, at most <see cref="WorkerOptions.MaxConcurrency"/> at once across all Cove sessions. A task
-/// reads its source from Cove over HTTP (through the worker's <see cref="SourceCache"/>), generates cover → preview →
+/// reads its source from the worker's filesystem when Cove sends a path the worker can read, else from Cove over HTTP
+/// (through the worker's <see cref="SourceCache"/>), generates cover → preview →
 /// sprite → phash in turn (a failed step does not stop the next), uploads each artifact as it is done, and reports the
 /// result. Nothing outlives the task: each step's scratch is deleted as soon as the step ends, and the task is
 /// cancelled if its session goes away.
@@ -79,20 +80,46 @@ public sealed class TaskRunner(
             cts.Cancel();
     }
 
-    /// <summary>Can this worker read the URL through Cove? Used by Cove's Test button.</summary>
+    /// <summary>Can this worker read the source, from its path or through Cove? Used by Cove's Test button.</summary>
     public async Task<ProbeResult> ProbeAsync(ProbeParams request, CancellationToken ct)
     {
         try
         {
+            if (ReadableFile(request.SourcePath, request.TaskId) is { } file)
+            {
+                var fileDuration = await engine.ProbeDurationAsync(MediaSource.ForFile(file.FullName, file.Length), ct);
+                return fileDuration > 0
+                    ? new ProbeResult(true, fileDuration, null, SourceAccess.File)
+                    : new ProbeResult(false, null, $"ffprobe could not read {file.FullName}", SourceAccess.File);
+            }
             await cove.CheckSourceAsync(request.SourceUrl, ct);
             var duration = await engine.ProbeDurationAsync(MediaSource.ForCove(request.SourceUrl, token.Value, 0), ct);
             return duration > 0
-                ? new ProbeResult(true, duration, null)
-                : new ProbeResult(false, null, "ffprobe could not read the video over HTTP");
+                ? new ProbeResult(true, duration, null, SourceAccess.Http)
+                : new ProbeResult(false, null, "ffprobe could not read the video over HTTP", SourceAccess.Http);
         }
         catch (CoveUnreachableException ex)
         {
-            return new ProbeResult(false, null, ex.Message);
+            return new ProbeResult(false, null, ex.Message, SourceAccess.Http);
+        }
+    }
+
+    /// <summary>The source file at <paramref name="path"/> when this worker can read it; null (with a warning when a
+    /// path was given) means reading over HTTP.</summary>
+    private FileInfo? ReadableFile(string? path, string taskId)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            return null;
+        try
+        {
+            var file = new FileInfo(path);
+            using (file.OpenRead())
+                return file;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+        {
+            logger.LogWarning("Task {TaskId}: cannot read {Path} on this worker ({Reason}); reading it over HTTP", taskId, path, ex.Message);
+            return null;
         }
     }
 
@@ -110,11 +137,22 @@ public sealed class TaskRunner(
         try
         {
             Directory.CreateDirectory(workDir);
-            var length = await cove.CheckSourceAsync(request.SourceUrl, ct) ?? request.SourceSize;
-            using var cached = await sourceCache.OpenAsync(request.SourceUrl, length, ct);
-            var source = cached is not null
-                ? MediaSource.ForLocal(cached.LocalUrl, length)
-                : MediaSource.ForCove(request.SourceUrl, token.Value, request.SourceSize);
+            CachedSource? cached = null;
+            MediaSource source;
+            if (ReadableFile(request.SourcePath, request.TaskId) is { } file)
+            {
+                source = MediaSource.ForFile(file.FullName, file.Length);
+                logger.LogInformation("Task {TaskId}: reading {Path}", request.TaskId, file.FullName);
+            }
+            else
+            {
+                var length = await cove.CheckSourceAsync(request.SourceUrl, ct) ?? request.SourceSize;
+                cached = await sourceCache.OpenAsync(request.SourceUrl, length, ct);
+                source = cached is not null
+                    ? MediaSource.ForCache(cached.LocalUrl, length)
+                    : MediaSource.ForCove(request.SourceUrl, token.Value, request.SourceSize);
+            }
+            using var lease = cached;
             var duration = request.Duration > 0 ? request.Duration : await engine.ProbeDurationAsync(source, ct);
             if (options.HwAccel is { } hwAccel)
             {

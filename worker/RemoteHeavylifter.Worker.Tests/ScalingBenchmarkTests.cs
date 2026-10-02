@@ -9,14 +9,28 @@ namespace RemoteHeavylifter.Worker.Tests;
 
 /// <summary>
 /// Opt-in benchmark: how throughput scales with videos at once, per GPU setup (Intel Quick Sync; NVIDIA CUDA + NVENC on
-/// two GPUs). For each count in HL_BENCH_COUNTS (default 1,2,4,8,12,16), max(8, 2×count) videos (HL_BENCH_FILE each
-/// time) run the worker's steps (cover → preview → sprite → phash). Results are appended to HL_BENCH_OUT/results.txt;
-/// without HL_BENCH_FILE and HL_BENCH_OUT the test skips.
+/// two GPUs). For each count in HL_BENCH_COUNTS (default 1,2,4,8,12,16), HL_BENCH_JOBS or max(8, 2×count) videos (HL_BENCH_FILE each
+/// time) run the worker's steps (cover → preview → sprite → phash). HL_BENCH_SETUPS (qsv, cuda; default both) picks
+/// the setups. Results are appended to HL_BENCH_OUT/results.txt; without HL_BENCH_FILE and HL_BENCH_OUT the test skips.
 /// </summary>
 public sealed class ScalingBenchmarkTests
 {
     [DllImport("kernel32.dll")]
     private static extern bool GetSystemTimes(out long idle, out long kernel, out long user);
+
+    /// <summary>CPU time since boot, total and idle, in the platform's units.</summary>
+    private static (long Total, long Idle) CpuTimes()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            GetSystemTimes(out var idle, out var kernel, out var user);
+            return (kernel + user, idle); // kernel time includes idle time
+        }
+        // Linux: "cpu  user nice system idle iowait irq softirq steal …" in clock ticks.
+        var ticks = File.ReadLines("/proc/stat").First().Split(' ', StringSplitOptions.RemoveEmptyEntries)
+            .Skip(1).Take(8).Select(long.Parse).ToArray();
+        return (ticks.Sum(), ticks[3] + ticks[4]);
+    }
 
     [Fact]
     public async Task ScalingBench()
@@ -40,15 +54,16 @@ public sealed class ScalingBenchmarkTests
             ("intel qsv", "qsv", [], "h264_qsv"),
             ("nvidia cuda+nvenc (2 GPUs)", "cuda", ["0", "1"], "h264_nvenc"),
         };
-        foreach (var setup in setups)
+        var picked = Environment.GetEnvironmentVariable("HL_BENCH_SETUPS")?.Split(',');
+        foreach (var setup in setups.Where(s => picked is null || picked.Contains(s.Accel)))
         foreach (var parallel in counts)
         {
-            var jobs = Math.Max(8, 2 * parallel);
+            var jobs = int.TryParse(Environment.GetEnvironmentVariable("HL_BENCH_JOBS"), out var fixedJobs) ? fixedJobs : Math.Max(8, 2 * parallel);
             var engine = new LibavMediaEngine(info!, new LibavEngineOptions(null, parallel, setup.Encoder, []), Engines.Cli);
             var queue = new ConcurrentQueue<int>(Enumerable.Range(0, jobs));
             var failures = new ConcurrentBag<string>();
             var perVideo = new ConcurrentBag<double>();
-            GetSystemTimes(out var idle0, out var kernel0, out var user0);
+            var cpu0 = CpuTimes();
             var wall = Stopwatch.StartNew();
             await Task.WhenAll(Enumerable.Range(0, parallel).Select(slot => Task.Run(async () =>
             {
@@ -78,9 +93,9 @@ public sealed class ScalingBenchmarkTests
                 }
             }, ct)));
             wall.Stop();
-            GetSystemTimes(out var idle1, out var kernel1, out var user1);
-            var total = (kernel1 - kernel0) + (user1 - user0);
-            var busy = total - (idle1 - idle0);
+            var cpu1 = CpuTimes();
+            var total = cpu1.Total - cpu0.Total;
+            var busy = total - (cpu1.Idle - cpu0.Idle);
             File.AppendAllText(log,
                 $"  {setup.Name}, {parallel,2} at once ({jobs} videos): {jobs / wall.Elapsed.TotalMinutes,5:F1} videos/min, "
                 + $"{perVideo.Average(),5:F1}s per video, CPU {100.0 * busy / total:F0}%, failures {failures.Count}"

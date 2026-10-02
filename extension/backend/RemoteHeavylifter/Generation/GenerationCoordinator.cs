@@ -110,7 +110,8 @@ public sealed class GenerationCoordinator(
                 notes.Add($"{worker.Name}: set the Cove URL for workers so it can read and upload files");
                 continue;
             }
-            live.Add(new LiveWorker(worker.Id, worker.Name, Math.Max(1, Math.Min(worker.MaxConcurrency, session.Info.Capacity)), baseUrl));
+            live.Add(new LiveWorker(worker.Id, worker.Name, Math.Max(1, Math.Min(worker.MaxConcurrency, session.Info.Capacity)), baseUrl,
+                worker.DirectMappings));
         }
         return (live, notes);
     }

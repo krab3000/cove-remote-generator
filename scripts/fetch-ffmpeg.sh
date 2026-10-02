@@ -11,7 +11,7 @@ rid=$1
 dest=$2
 branch=9.0
 repo=$(cd "$(dirname "$0")/.." && pwd)
-libs="avcodec avformat avfilter avutil swresample swscale"
+libs="avcodec avdevice avformat avfilter avutil swresample swscale"
 
 case "$rid" in
   win-x64) asset="ffmpeg-n$branch-latest-win64-gpl-shared-$branch.zip" ;;

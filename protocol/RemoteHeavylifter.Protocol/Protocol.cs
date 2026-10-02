@@ -140,6 +140,8 @@ public sealed record SpriteSpec(int MaxFrames, int FrameWidth, string? PreFilter
 public sealed record PhashSpec(int FrameCount = 25, int FrameWidth = 160);
 
 /// <summary>One video to generate. URLs are absolute; the worker sends its token with every request to them.</summary>
+/// <param name="SourcePath">The source as a path on the worker's own filesystem, for a worker set to read sources
+/// directly; the worker falls back to <paramref name="SourceUrl"/> when it cannot read it. Null reads over HTTP.</param>
 public sealed record TaskRequest(
     string TaskId,
     int VideoId,
@@ -150,7 +152,8 @@ public sealed record TaskRequest(
     CoverSpec? Cover,
     PreviewSpec? Preview,
     SpriteSpec? Sprite,
-    PhashSpec? Phash = null);
+    PhashSpec? Phash = null,
+    string? SourcePath = null);
 
 public sealed record TaskProgress(string TaskId, double Progress, string? Stage);
 
@@ -167,9 +170,22 @@ public sealed record TaskResult(
     string? ErrorCode,
     IReadOnlyDictionary<string, ArtifactResult> Artifacts);
 
-public sealed record ProbeParams(string TaskId, string SourceUrl);
+/// <param name="SourcePath">As <see cref="TaskRequest.SourcePath"/>.</param>
+public sealed record ProbeParams(string TaskId, string SourceUrl, string? SourcePath = null);
 
-public sealed record ProbeResult(bool Ok, double? Duration, string? Error);
+/// <param name="SourceAccess">How the worker read the source: <see cref="SourceAccess.File"/> or <see cref="SourceAccess.Http"/>
+/// (null from workers that predate direct reads).</param>
+public sealed record ProbeResult(bool Ok, double? Duration, string? Error, string? SourceAccess = null);
+
+/// <summary>How a worker reads source videos.</summary>
+public static class SourceAccess
+{
+    /// <summary>Over HTTP from Cove.</summary>
+    public const string Http = "http";
+
+    /// <summary>From the worker's own filesystem, through the worker's path mappings.</summary>
+    public const string File = "file";
+}
 
 /// <summary>Body of a successful artifact upload response.</summary>
 public sealed record UploadReceipt(long Size, string Sha256);

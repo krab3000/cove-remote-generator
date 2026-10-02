@@ -177,4 +177,41 @@ public class InputOptionsTests
         Assert.Null(options.HwAccel);
         Assert.Contains(options.Validate(), e => e.Contains("HL_HWACCEL_DEVICES"));
     }
+
+    [Fact]
+    public void Flags_override_the_environment()
+    {
+        var env = new Dictionary<string, string> { ["HL_COVE_URL"] = "http://env", ["HL_MAX_CONCURRENCY"] = "3", ["HL_HWACCEL"] = "cuda" };
+        var (options, errors, help) = WorkerOptions.Load(
+            ["--cove-url", "http://flag/", "--max-concurrency=5", "--hwaccel=", "--sprite-seek", "keyframe"], env.GetValueOrDefault);
+
+        Assert.Empty(errors);
+        Assert.False(help);
+        Assert.Equal("http://flag", options.CoveUrl);
+        Assert.Equal(5, options.MaxConcurrency);
+        Assert.Null(options.HwAccel); // an empty flag clears the variable
+        Assert.True(options.SpriteKeyframes);
+
+        Assert.Equal("http://env", WorkerOptions.Load([], env.GetValueOrDefault).Options.CoveUrl);
+    }
+
+    [Fact]
+    public void Bad_flags_are_errors_and_help_is_recognised()
+    {
+        var (_, errors, help) = WorkerOptions.Load(["--nope=1", "--cove-url", "--help"], _ => null);
+        Assert.True(help);
+        Assert.Contains(errors, e => e.Contains("Unknown option --nope=1"));
+        Assert.Contains(errors, e => e.Contains("--cove-url needs a value"));
+    }
+
+    [Fact]
+    public void Every_setting_has_a_flag_and_is_read()
+    {
+        Assert.Equal("--cove-url", WorkerOptions.Flag("HL_COVE_URL"));
+        Assert.Equal("--source-cache-mb", WorkerOptions.Flag("HL_SOURCE_CACHE_MB"));
+        var read = new HashSet<string>();
+        WorkerOptions.Load([], name => { read.Add(name); return null; });
+        Assert.Equal(read, WorkerOptions.Settings.Select(s => s.Env).ToHashSet());
+        Assert.All(WorkerOptions.Settings, s => Assert.Contains(WorkerOptions.Flag(s.Env), WorkerOptions.Usage()));
+    }
 }

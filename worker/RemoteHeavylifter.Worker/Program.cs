@@ -12,8 +12,13 @@ using RemoteHeavylifter.Worker.Media.Libav;
 using RemoteHeavylifter.Worker.Tasks;
 using RemoteHeavylifter.Worker.Transport;
 
-var options = WorkerOptions.FromEnvironment();
-if (options.Validate() is { Count: > 0 } errors)
+var (options, argErrors, help) = WorkerOptions.Load(args);
+if (help)
+{
+    Console.Write(WorkerOptions.Usage());
+    return 0;
+}
+if (argErrors.Concat(options.Validate()).ToList() is { Count: > 0 } errors)
 {
     foreach (var error in errors)
         Console.Error.WriteLine(error);
@@ -60,7 +65,8 @@ Directory.CreateDirectory(options.TasksDir);
 
 // Cove can dial the worker only when it listens. An ephemeral loopback port is always bound: ffmpeg reads task
 // sources from the worker's SourceCache there.
-var builder = WebApplication.CreateBuilder(args);
+// The worker's flags are its own (WorkerOptions), not ASP.NET configuration.
+var builder = WebApplication.CreateBuilder();
 builder.Logging.AddSimpleConsole(o =>
 {
     o.SingleLine = true;

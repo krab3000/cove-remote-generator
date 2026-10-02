@@ -22,14 +22,17 @@ public static class LibavLoader
     private static LibavInfo? _info;
     private static string _failure = "";
 
-    /// <summary>Where to look: <paramref name="configured"/> (HL_FFMPEG_LIBS), the bundled <c>ffmpeg</c> folder next to
-    /// the worker (flat on Windows, <c>ffmpeg/lib</c> on Linux; scripts/fetch-ffmpeg.sh), /opt/ffmpeg/lib (Docker), and
+    /// <summary>Where to look: <paramref name="configured"/> (HL_FFMPEG_LIBS) and the bundled <c>ffmpeg</c> folder next to
+    /// the worker, each flat (Windows) or with a <c>lib</c> subfolder (Linux; scripts/fetch-ffmpeg.sh), /opt/ffmpeg/lib (Docker), and
     /// on macOS Homebrew's ffmpeg (Apple Silicon, then Intel prefix): BtbN has no macOS builds, and Homebrew's has
     /// VideoToolbox. A Homebrew FFmpeg of another major version is found too, and then rejected by the version check.</summary>
     public static IEnumerable<string> Candidates(string? configured)
     {
         if (!string.IsNullOrWhiteSpace(configured))
+        {
             yield return configured;
+            yield return Path.Combine(configured, "lib");
+        }
         yield return Path.Combine(AppContext.BaseDirectory, "ffmpeg");
         yield return Path.Combine(AppContext.BaseDirectory, "ffmpeg", "lib");
         yield return "/opt/ffmpeg/lib";

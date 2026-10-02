@@ -23,7 +23,9 @@ public sealed record CoordinatorTimings(
 }
 
 /// <summary>A worker taking part in a run: how many videos it may work on at once, and how it reaches Cove.</summary>
-public sealed record LiveWorker(Guid WorkerId, string Name, int Slots, string CoveBaseUrl);
+/// <param name="DirectMappings">The worker's path mappings when it reads sources from its own filesystem; null when it
+/// reads them over HTTP.</param>
+public sealed record LiveWorker(Guid WorkerId, string Name, int Slots, string CoveBaseUrl, IReadOnlyList<PathMapping>? DirectMappings = null);
 
 public sealed record RunContext(string RunId, GeneratedPaths Paths, PreviewSettings Preview, bool Overwrite);
 
@@ -179,7 +181,7 @@ internal sealed class RunExecutor(
         try
         {
             var result = await session.RunTaskAsync(
-                BuildRequest(item, taskId, slot.Live.CoveBaseUrl),
+                BuildRequest(item, taskId, slot.Live),
                 p => item.Unit?.Report(p.Progress, $"{slot.Name}: {p.Stage ?? "working"}"),
                 timeout.Token);
 
@@ -233,10 +235,10 @@ internal sealed class RunExecutor(
         return kinds;
     }
 
-    private TaskRequest BuildRequest(WorkItem item, string taskId, string coveBaseUrl)
+    private TaskRequest BuildRequest(WorkItem item, string taskId, LiveWorker live)
     {
         var preview = _run.Preview;
-        var taskUrl = $"{coveBaseUrl.TrimEnd('/')}/api/ext/{extensionId}/worker/tasks/{Uri.EscapeDataString(taskId)}";
+        var taskUrl = $"{live.CoveBaseUrl.TrimEnd('/')}/api/ext/{extensionId}/worker/tasks/{Uri.EscapeDataString(taskId)}";
         return new TaskRequest(
             taskId,
             item.VideoId,
@@ -250,7 +252,8 @@ internal sealed class RunExecutor(
                     preview.Preset, preview.Audio, PreviewSettings.Crf, PreviewSettings.Width, item.PreviewScale)
                 : null,
             item.Sprite ? new SpriteSpec(SpriteSettings.MaxFrames, item.SpriteWidth, item.SpriteFilter, GeneratedPaths.SpriteFileName(item.VideoId)) : null,
-            item.Phash ? new PhashSpec() : null);
+            item.Phash ? new PhashSpec() : null,
+            live.DirectMappings is { } mappings ? PathMapper.Map(item.CovePath, mappings) : null);
     }
 
     /// <summary>Commit every requested artifact the worker produced and uploaded. Returns what is missing.</summary>

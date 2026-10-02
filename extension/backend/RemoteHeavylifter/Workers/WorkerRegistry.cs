@@ -161,6 +161,20 @@ public sealed class WorkerRegistry(StoreHolder store)
         if (item.MaxConcurrency < 1 || item.MaxConcurrency > MaxConcurrencyLimit)
             errors.Add($"{label}: max parallel videos must be between 1 and {MaxConcurrencyLimit}.");
 
+        var access = string.IsNullOrWhiteSpace(item.SourceAccess) ? SourceAccess.Http : item.SourceAccess.Trim().ToLowerInvariant();
+        if (access is not (SourceAccess.Http or SourceAccess.File))
+            errors.Add($"{label}: source access must be {SourceAccess.Http} or {SourceAccess.File}.");
+        var mappings = (item.PathMappings ?? [])
+            .Select(m => new PathMapping(PathMapper.Trim(m.CovePath), PathMapper.Trim(m.WorkerPath)))
+            .Where(m => m.CovePath.Length > 0 || m.WorkerPath.Length > 0)
+            .ToList();
+        if (mappings.Any(m => m.CovePath.Length == 0 || m.WorkerPath.Length == 0))
+            errors.Add($"{label}: every path mapping needs both a Cove path and a worker path.");
+        if (mappings.GroupBy(m => m.CovePath, StringComparer.Ordinal).FirstOrDefault(g => g.Count() > 1) is { } duplicate)
+            errors.Add($"{label}: {duplicate.Key} is mapped more than once.");
+        if (access == SourceAccess.File && mappings.Count == 0)
+            errors.Add($"{label}: reading sources directly needs at least one path mapping.");
+
         if (errors.Count > errorCount)
             return null;
 
@@ -175,6 +189,8 @@ public sealed class WorkerRegistry(StoreHolder store)
             CoveUrlOverride = coveUrl,
             Enabled = item.Enabled,
             MaxConcurrency = item.MaxConcurrency,
+            SourceAccess = access,
+            PathMappings = mappings,
         };
     }
 

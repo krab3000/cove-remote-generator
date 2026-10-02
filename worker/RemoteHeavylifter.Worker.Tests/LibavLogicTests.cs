@@ -76,7 +76,7 @@ public class LibavLogicTests
              new("reconnect_delay_max", "5"), new("rw_timeout", "30000000")],
             source.ProtocolOptions());
         Assert.Equal(("cuda", "1"), source.HwDecode);
-        Assert.Equal(("d3d11va", (string?)null), MediaSource.ForLocal("http://x", 1).WithHardwareDecode("d3d11va", null).HwDecode);
+        Assert.Equal(("d3d11va", (string?)null), MediaSource.ForCache("http://x", 1).WithHardwareDecode("d3d11va", null).HwDecode);
         Assert.Null(source.Software.HwDecode);
     }
 }

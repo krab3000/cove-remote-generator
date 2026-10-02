@@ -182,6 +182,9 @@ public sealed class RunExecutorTests : IDisposable
 
     private FakeWorker Worker(string name) => new(name, _access);
 
+    /// <summary>Path mappings every worker of the next run reads files directly through; null reads over HTTP.</summary>
+    private IReadOnlyList<PathMapping>? _direct;
+
     private static List<WorkItem> Items(int count) => Enumerable.Range(1, count)
         .Select(id => new WorkItem
         {
@@ -208,7 +211,7 @@ public sealed class RunExecutorTests : IDisposable
         var counters = new RunCounters { Total = items.Count };
         var run = new RunContext("run1", _paths, new PreviewSettings(12, 0.75, "0", "0", "slow", false), overwrite);
         var perWorker = await executor.ExecuteAsync(
-            workers.Select(w => new LiveWorker(w.Worker.WorkerId, w.Worker.Name, w.Slots, $"http://cove-for-{w.Worker.Name}:5073")).ToList(),
+            workers.Select(w => new LiveWorker(w.Worker.WorkerId, w.Worker.Name, w.Slots, $"http://cove-for-{w.Worker.Name}:5073", _direct)).ToList(),
             items, run, progress, counters, ct);
         return (progress, counters, perWorker);
     }
@@ -251,6 +254,19 @@ public sealed class RunExecutorTests : IDisposable
         Assert.Equal(1000, request.SourceSize);
         Assert.Equal(ArtifactKinds.All.ToHashSet(), request.UploadUrls.Keys.ToHashSet());
         Assert.Equal($"{taskRoot}/artifacts/preview", request.UploadUrls[ArtifactKinds.Preview]);
+        Assert.Null(request.SourcePath);
+    }
+
+    [Fact]
+    public async Task Direct_workers_get_the_mapped_path_and_keep_the_url()
+    {
+        var a = Worker("a");
+        _direct = [new PathMapping("/cove", "/mnt/cove")];
+        await RunAsync(Items(1), false, TestContext.Current.CancellationToken, (a, 1));
+
+        var request = Assert.Single(a.Requests);
+        Assert.Equal("/mnt/cove/v1.mp4", request.SourcePath);
+        Assert.EndsWith("/source", request.SourceUrl);
     }
 
     [Fact]

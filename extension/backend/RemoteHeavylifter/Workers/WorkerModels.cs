@@ -26,6 +26,17 @@ public sealed record WorkerDefinition
     public bool Enabled { get; init; } = true;
     public int MaxConcurrency { get; init; } = 2;
 
+    /// <summary>How the worker reads source videos: <see cref="SourceAccess.Http"/> (from Cove) or
+    /// <see cref="SourceAccess.File"/> (from its own filesystem through <see cref="PathMappings"/>, else from Cove).</summary>
+    public string SourceAccess { get; init; } = Protocol.SourceAccess.Http;
+
+    /// <summary>Where Cove's folders are on the worker. Kept while <see cref="SourceAccess"/> is HTTP, used only for files.</summary>
+    public IReadOnlyList<PathMapping> PathMappings { get; init; } = [];
+
+    /// <summary>The mappings when the worker reads files directly; null when it reads over HTTP.</summary>
+    [JsonIgnore]
+    public IReadOnlyList<PathMapping>? DirectMappings => SourceAccess == Protocol.SourceAccess.File ? PathMappings : null;
+
     [JsonIgnore]
     public string WorkerTokenId => WorkerTokens.IdFromHash(TokenHash);
 
@@ -47,7 +58,9 @@ public sealed record WorkerView(
     string? CoveUrlOverride,
     bool Enabled,
     int MaxConcurrency,
-    string Connection)
+    string Connection,
+    string SourceAccess,
+    IReadOnlyList<PathMapping> PathMappings)
 {
     public static WorkerView From(WorkerDefinition worker) => new(
         worker.Id,
@@ -59,7 +72,9 @@ public sealed record WorkerView(
         worker.CoveUrlOverride,
         worker.Enabled,
         worker.MaxConcurrency,
-        worker.Connection);
+        worker.Connection,
+        worker.SourceAccess,
+        worker.PathMappings);
 }
 
 /// <summary>A worker as the UI submits it. A null <see cref="Token"/> keeps the stored token (or hash).</summary>
@@ -70,7 +85,12 @@ public sealed record WorkerInput(
     string? Url,
     string? CoveUrlOverride,
     bool Enabled = true,
-    int MaxConcurrency = 2);
+    int MaxConcurrency = 2,
+    string? SourceAccess = null,
+    IReadOnlyList<PathMapping>? PathMappings = null);
+
+/// <summary>A folder as Cove stores its path, and the same folder on a worker.</summary>
+public sealed record PathMapping(string CovePath, string WorkerPath);
 
 /// <summary>A worker that dialed in with a token no configured worker has; waits for someone to trust it.</summary>
 public sealed record PendingWorker(

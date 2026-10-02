@@ -3,7 +3,8 @@ using RemoteHeavylifter.Worker.Media;
 
 namespace RemoteHeavylifter.Worker.Hosting;
 
-/// <summary>Worker settings, read from <c>HL_*</c> environment variables.</summary>
+/// <summary>Worker settings, read from command-line flags and <c>HL_*</c> environment variables (a flag wins): every
+/// variable has a flag named after it, e.g. <c>HL_COVE_URL</c> is <c>--cove-url</c>.</summary>
 public sealed record WorkerOptions
 {
     /// <summary>Listen for Cove here (Cove dials the worker), e.g. http://0.0.0.0:8750.</summary>
@@ -52,6 +53,72 @@ public sealed record WorkerOptions
     public string TasksDir => Path.Combine(DataDir, "tasks");
 
     public MediaContext Media => new(Ffmpeg, Ffprobe, FfmpegInputArgs, Encoder);
+
+    /// <summary>Every setting's environment variable, with its <c>--help</c> text.</summary>
+    public static readonly IReadOnlyList<(string Env, string Help)> Settings =
+    [
+        ("HL_LISTEN_URL", "Listen for Cove here (Cove connects to the worker), e.g. http://0.0.0.0:8750."),
+        ("HL_COVE_URL", "Connect to Cove here (the worker connects to Cove), e.g. http://192.168.1.10:5073."),
+        ("HL_WORKER_NAME", "Name shown in Cove. Default: the host name."),
+        ("HL_WORKER_TOKEN", "Token Cove knows the worker by (16+ characters). Default: generated into the data directory."),
+        ("HL_DATA_DIR", "Token and scratch files. Default: ./data."),
+        ("HL_MAX_CONCURRENCY", "Videos at once. Default: CPU cores / 4, at least 1."),
+        ("HL_SOURCE_CACHE_MB", "RAM for source bytes read over HTTP, shared by all tasks; 0 turns it off. Default: 1024."),
+        ("HL_H264_ENCODER", "Preview encoder, e.g. h264_nvenc, h264_qsv. Default: libx264."),
+        ("HL_HWACCEL", "Decode on the GPU with this ffmpeg hwaccel, e.g. cuda, qsv, vaapi; none decodes in software."),
+        ("HL_HWACCEL_DEVICES", "Comma-separated hwaccel devices that tasks take in turn, e.g. 0,1."),
+        ("HL_FFMPEG_INPUT_ARGS", "Extra ffmpeg input options, separated by spaces."),
+        ("HL_MEDIA_ENGINE", "auto, libav or cli. Default: auto."),
+        ("HL_FFMPEG_LIBS", "Directory with the FFmpeg shared libraries. Default: the bundled ffmpeg folder."),
+        ("HL_SPRITE_SEEK", "exact or keyframe. Default: exact."),
+        ("HL_DECODE_THREADS", "Decoder threads per video (libav). Default: chosen per operation."),
+        ("HL_FFMPEG", "ffmpeg executable. Default: the bundled one, else ffmpeg on PATH."),
+        ("HL_FFPROBE", "ffprobe executable. Default: the bundled one, else ffprobe on PATH."),
+    ];
+
+    /// <summary>The command-line flag for a setting: HL_COVE_URL → --cove-url.</summary>
+    public static string Flag(string env) => "--" + env["HL_".Length..].ToLowerInvariant().Replace('_', '-');
+
+    /// <summary>The <c>--help</c> text.</summary>
+    public static string Usage()
+    {
+        var width = Settings.Max(s => Flag(s.Env).Length + s.Env.Length) + 4;
+        return "Usage: RemoteHeavylifter.Worker [--flag value | --flag=value] ...\n"
+               + "Each flag can be set as its environment variable instead; a flag wins.\n\n"
+               + string.Concat(Settings.Select(s => $"  {(Flag(s.Env) + "  " + s.Env).PadRight(width)}{s.Help}\n"));
+    }
+
+    /// <summary>Settings from <paramref name="args"/> (<c>--cove-url http://…</c> or <c>--cove-url=http://…</c>), then
+    /// from the environment. <c>Errors</c> lists unknown flags and flags without a value; <c>Help</c> is set by
+    /// <c>--help</c> or <c>-h</c>.</summary>
+    public static (WorkerOptions Options, IReadOnlyList<string> Errors, bool Help) Load(IReadOnlyList<string> args, Func<string, string?>? env = null)
+    {
+        env ??= Environment.GetEnvironmentVariable;
+        var byFlag = Settings.ToDictionary(s => Flag(s.Env), s => s.Env);
+        var flags = new Dictionary<string, string>();
+        var errors = new List<string>();
+        var help = false;
+        for (var i = 0; i < args.Count; i++)
+        {
+            var arg = args[i];
+            if (arg is "--help" or "-h")
+            {
+                help = true;
+                continue;
+            }
+            var eq = arg.IndexOf('=');
+            var flag = eq < 0 ? arg : arg[..eq];
+            if (!byFlag.TryGetValue(flag, out var name))
+                errors.Add($"Unknown option {arg}; see --help.");
+            else if (eq >= 0)
+                flags[name] = arg[(eq + 1)..];
+            else if (i + 1 < args.Count && !args[i + 1].StartsWith("--", StringComparison.Ordinal))
+                flags[name] = args[++i];
+            else
+                errors.Add($"{flag} needs a value.");
+        }
+        return (FromEnvironment(name => flags.TryGetValue(name, out var value) ? value : env(name)), errors, help);
+    }
 
     public static WorkerOptions FromEnvironment(Func<string, string?>? read = null)
     {

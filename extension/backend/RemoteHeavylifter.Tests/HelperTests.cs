@@ -247,6 +247,75 @@ public sealed class WorkerRegistryTests
         Assert.Contains(errors, e => e.Contains("more than one worker"));
         Assert.Contains(errors, e => e.Contains("already uses this token"));
     }
+
+    [Fact]
+    public void Direct_source_access_keeps_trimmed_mappings_and_needs_one()
+    {
+        var (workers, errors) = WorkerRegistry.Merge(
+            [new WorkerInput(null, "a", Token, null, null, true, 2, "FILE", [new(" /media/ ", "/mnt/media/"), new("", " ")])], []);
+        Assert.Empty(errors);
+        Assert.Equal(SourceAccess.File, workers[0].SourceAccess);
+        Assert.Equal([new PathMapping("/media", "/mnt/media")], workers[0].PathMappings);
+        Assert.Equal(workers[0].PathMappings, workers[0].DirectMappings);
+        Assert.Null((workers[0] with { SourceAccess = SourceAccess.Http }).DirectMappings);
+
+        (_, errors) = WorkerRegistry.Merge(
+        [
+            new WorkerInput(null, "a", Token, null, null, true, 2, SourceAccess.File),
+            new WorkerInput(null, "b", Token + "b", null, null, true, 2, "ftp"),
+            new WorkerInput(null, "c", Token + "c", null, null, true, 2, SourceAccess.File, [new("/media", "")]),
+            new WorkerInput(null, "d", Token + "d", null, null, true, 2, SourceAccess.File, [new("/m", "/x"), new("/m/", "/y")]),
+        ], []);
+        Assert.Contains(errors, e => e.StartsWith("a:") && e.Contains("at least one path mapping"));
+        Assert.Contains(errors, e => e.StartsWith("b:") && e.Contains("source access"));
+        Assert.Contains(errors, e => e.StartsWith("c:") && e.Contains("both a Cove path and a worker path"));
+        Assert.Contains(errors, e => e.StartsWith("d:") && e.Contains("mapped more than once"));
+    }
+
+    [Fact]
+    public void Stored_workers_without_source_access_read_over_http()
+    {
+        var stored = JsonSerializer.Deserialize<WorkerDefinition>(
+            """{"id":"11111111-1111-1111-1111-111111111111","name":"old","tokenHash":"h"}""", new JsonSerializerOptions(JsonSerializerDefaults.Web))!;
+        Assert.Equal(SourceAccess.Http, stored.SourceAccess);
+        Assert.Empty(stored.PathMappings);
+        Assert.Null(stored.DirectMappings);
+    }
+}
+
+public sealed class PathMapperTests
+{
+    private static readonly PathMapping[] Mappings =
+    [
+        new("/media", "/mnt/media"),
+        new("/media/movies", "/srv/movies"),
+        new("/win", @"D:\Videos"),
+    ];
+
+    [Theory]
+    [InlineData("/media/a.mp4", "/mnt/media/a.mp4")]
+    [InlineData("/media/tv/s1/e1.mkv", "/mnt/media/tv/s1/e1.mkv")]
+    [InlineData("/media/movies/x.mp4", "/srv/movies/x.mp4")]
+    [InlineData("/win/sub/x.mp4", @"D:\Videos\sub\x.mp4")]
+    [InlineData("/media2/a.mp4", null)]
+    [InlineData("/other/a.mp4", null)]
+    public void Maps_by_the_longest_whole_segment_prefix(string covePath, string? expected)
+        => Assert.Equal(expected, PathMapper.Map(covePath, Mappings));
+
+    [Fact]
+    public void Root_and_windows_cove_paths_map()
+    {
+        Assert.Equal("/host/media/a.mp4", PathMapper.Map("/media/a.mp4", [new("/", "/host")]));
+        Assert.Equal("/mnt/c/Videos/a.mp4", PathMapper.Map(@"C:\Videos\a.mp4", [new(@"C:\", "/mnt/c")]));
+    }
+
+    [Theory]
+    [InlineData(" /media/ ", "/media")]
+    [InlineData("/", "/")]
+    [InlineData(@"C:\", @"C:\")]
+    [InlineData(@"C:\Videos\", @"C:\Videos")]
+    [InlineData("  ", "")]
+    public void Trims_mapping_paths(string input, string expected) => Assert.Equal(expected, PathMapper.Trim(input));
 }
 
 public sealed class WorkerTokensTests
@@ -352,5 +421,11 @@ public sealed class ProtocolJsonTests
         Assert.Contains("\"spriteFilename\":\"7_sprite.jpg\"", json);
         Assert.DoesNotContain("\"preview\"", json);
         Assert.Equal(request.Sprite, JsonSerializer.Deserialize<TaskRequest>(json, RpcChannel.JsonOptions)!.Sprite);
+        Assert.DoesNotContain("sourcePath", json);
+
+        var direct = request with { SourcePath = "/mnt/media/a.mp4" };
+        json = JsonSerializer.Serialize(direct, RpcChannel.JsonOptions);
+        Assert.Contains("\"sourcePath\":\"/mnt/media/a.mp4\"", json);
+        Assert.Equal(direct.SourcePath, JsonSerializer.Deserialize<TaskRequest>(json, RpcChannel.JsonOptions)!.SourcePath);
     }
 }

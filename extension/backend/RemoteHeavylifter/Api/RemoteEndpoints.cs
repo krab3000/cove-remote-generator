@@ -125,9 +125,9 @@ internal static class RemoteEndpoints
             if (WorkerHub.ResolveCoveBaseUrl(worker, settings, session.InboundBaseUrl) is not { } baseUrl)
                 return Results.Ok(new WorkerTestResult(false, "Connected, but set the Cove URL for workers so it can read and upload files."));
 
-            (string Path, long Size)? sample;
+            (string CovePath, string Path, long Size)? sample;
             await using (var scope = scopes.CreateAsyncScope())
-                sample = await scope.ServiceProvider.GetRequiredService<VideoWorkSelector>().SampleSourceAsync(timeout.Token);
+                sample = await scope.ServiceProvider.GetRequiredService<VideoWorkSelector>().SampleSourceAsync(worker.DirectMappings, timeout.Token);
             if (sample is not { } source)
                 return Results.Ok(new WorkerTestResult(true, $"Connected ({info.Encoder}, {info.Capacity} slots). No video available to test reading with."));
 
@@ -136,10 +136,20 @@ internal static class RemoteEndpoints
             try
             {
                 var url = $"{baseUrl}/api/ext/{RemoteHeavylifterExtension.ExtensionId}/worker/tasks/{taskId}/source";
-                var probe = await session.ProbeAsync(new ProbeParams(taskId, url), timeout.Token);
+                var workerPath = worker.DirectMappings is { } mappings ? PathMapper.Map(source.CovePath, mappings) : null;
+                var probe = await session.ProbeAsync(new ProbeParams(taskId, url, workerPath), timeout.Token);
+                var connected = $"Connected ({info.Encoder}, {info.Capacity} slots)";
+                if (probe.SourceAccess == SourceAccess.File)
+                    return Results.Ok(probe.Ok
+                        ? new WorkerTestResult(true, $"{connected} and read {workerPath} directly.")
+                        : new WorkerTestResult(false, $"{connected}, but the worker could not read {workerPath}: {probe.Error}"));
+                var fellBack = worker.DirectMappings is null ? ""
+                    : workerPath is null ? $" No path mapping covers {source.CovePath}, so it was read over HTTP."
+                    : probe.SourceAccess is null ? " This worker version cannot read files directly, so it was read over HTTP — update the worker."
+                    : $" {workerPath} is not readable on the worker, so it was read over HTTP — check the path mappings.";
                 return Results.Ok(probe.Ok
-                    ? new WorkerTestResult(true, $"Connected ({info.Encoder}, {info.Capacity} slots) and read a video from {baseUrl}.")
-                    : new WorkerTestResult(false, $"Connected, but the worker could not read from {baseUrl}: {probe.Error}"));
+                    ? new WorkerTestResult(fellBack.Length == 0, $"{connected} and read a video from {baseUrl}.{fellBack}")
+                    : new WorkerTestResult(false, $"{connected}, but the worker could not read from {baseUrl}: {probe.Error}{fellBack}"));
             }
             finally
             {

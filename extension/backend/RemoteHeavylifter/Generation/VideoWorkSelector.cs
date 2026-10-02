@@ -2,6 +2,7 @@ using Cove.Core.Common;
 using Cove.Core.Entities;
 using Cove.Core.Interfaces;
 using Microsoft.EntityFrameworkCore;
+using RemoteHeavylifter.Workers;
 
 namespace RemoteHeavylifter.Generation;
 
@@ -162,21 +163,29 @@ public sealed class VideoWorkSelector(DbContext db)
         return new SelectionResult(work, settled, examined);
     }
 
-    /// <summary>One readable primary video file, for testing that a worker can read through Cove.</summary>
-    public async Task<(string Path, long Size)?> SampleSourceAsync(CancellationToken ct)
+    /// <summary>One readable primary video file, for testing that a worker can read it: under one of
+    /// <paramref name="mappings"/> when there is one, so a worker reading files directly is tested on a mapped file.</summary>
+    /// <returns>The path as Cove stores it, and as this machine opens it.</returns>
+    public async Task<(string CovePath, string Path, long Size)?> SampleSourceAsync(IReadOnlyList<PathMapping>? mappings, CancellationToken ct)
     {
-        var candidates = await db.Set<VideoFile>()
-            .AsNoTracking()
-            .Where(file => file.VideoId != null)
-            .OrderBy(file => file.Size)
-            .Select(file => new { file.Path, file.Size })
-            .Take(20)
-            .ToListAsync(ct);
-        foreach (var candidate in candidates)
+        foreach (var prefix in (mappings ?? []).Select(m => m.CovePath).Append(null))
         {
-            var path = FilesystemPaths.ToNativePath(candidate.Path);
-            if (File.Exists(path))
-                return (path, candidate.Size);
+            var query = db.Set<VideoFile>().AsNoTracking().Where(file => file.VideoId != null);
+            if (prefix is not null)
+                query = query.Where(file => file.Path.StartsWith(prefix));
+            var candidates = await query
+                .OrderBy(file => file.Size)
+                .Select(file => new { file.Path, file.Size })
+                .Take(20)
+                .ToListAsync(ct);
+            foreach (var candidate in candidates)
+            {
+                if (prefix is not null && PathMapper.Map(candidate.Path, mappings!) is null)
+                    continue;
+                var path = FilesystemPaths.ToNativePath(candidate.Path);
+                if (File.Exists(path))
+                    return (candidate.Path, path, candidate.Size);
+            }
         }
         return null;
     }

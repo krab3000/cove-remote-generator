@@ -2,7 +2,7 @@ using RemoteHeavylifter.Protocol;
 
 namespace RemoteHeavylifter.Worker.Media;
 
-/// <summary>A video ffmpeg reads directly (normally an HTTP URL served by Cove).</summary>
+/// <summary>A video ffmpeg reads directly: an HTTP URL served by Cove (or the worker's cache of one), or a local file.</summary>
 /// <param name="InputOptions">Per-input ffmpeg options placed immediately before every <c>-i</c> of this source,
 /// because ffmpeg applies input options only to the next input.</param>
 /// <param name="Size">Byte size as reported by Cove; only shapes decode timeouts (&lt;= 0 means the minimum).</param>
@@ -33,13 +33,16 @@ public sealed record MediaSource(string Url, IReadOnlyList<string> InputOptions,
 
     /// <summary>The worker's own loopback copy of a Cove source (<see cref="Transport.SourceCache"/>): no token, same
     /// reconnects, since a failed upstream fetch drops the connection and ffmpeg resumes with a range request.</summary>
-    public static MediaSource ForLocal(string url, long size) => new(url,
+    public static MediaSource ForCache(string url, long size) => new(url,
     [
         "-reconnect", "1",
         "-reconnect_on_network_error", "1",
         "-reconnect_delay_max", "5",
         "-rw_timeout", "30000000",
     ], size);
+
+    /// <summary>A file on the worker's own filesystem: no protocol options.</summary>
+    public static MediaSource ForFile(string path, long size) => new(path, [], size);
 
     /// <summary><see cref="InputOptions"/> as libav dictionary entries: <c>-headers "X: y"</c> → (<c>headers</c>, <c>X: y</c>).</summary>
     public IEnumerable<KeyValuePair<string, string>> ProtocolOptions()

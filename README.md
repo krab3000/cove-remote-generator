@@ -5,7 +5,7 @@ This project moves Cove's heaviest per-video work onto other machines. Generatin
 It has three parts:
 
 | Part | Path | What it is |
-|---|---|---|
+|---|---|---|---|
 | Worker | [worker/](worker/) | A .NET service that runs ffmpeg. It reads each video from Cove over HTTP and uploads the results back, so it needs no access to the media library. |
 | Cove extension | [extension/](extension/) | A C# backend and a React settings UI. It adds a **Remote Generation** settings tab (workers, pending workers, and a Generate panel), a job in Cove's Jobs drawer, and a "Remote generate" entry in Cove's task list. |
 | Protocol | [protocol/](protocol/) | The JSON-RPC messages and constants shared by the two. |
@@ -175,24 +175,28 @@ dotnet run --project worker/RemoteHeavylifter.Worker -c Release
 
 Stop the worker with Ctrl+C. Tasks it was running are re-queued by Cove on another worker.
 
-| Variable | Default | Meaning |
-|---|---|---|
-| `HL_COVE_URL` | – | Dial Cove at this `http(s)://` address. |
-| `HL_LISTEN_URL` | – | Listen for Cove here, for example `http://0.0.0.0:8750`; Cove dials `ws://host:8750/rpc`. Set at least one of `HL_COVE_URL` and `HL_LISTEN_URL`, or both. |
-| `HL_WORKER_TOKEN` | generated | A fixed token, at least 16 characters. Without it, the worker generates one and keeps it in `HL_DATA_DIR/worker.token`. |
-| `HL_WORKER_NAME` | host name | Shown in Cove. |
-| `HL_DATA_DIR` | `./data` | Token and scratch. A step's scratch files are deleted as soon as that step ends. |
-| `HL_MAX_CONCURRENCY` | `cpu/4` | Videos generated at once, shared by every Cove connected to the worker. Cove also caps this per worker. |
-| `HL_SOURCE_CACHE_MB` | `1024` | RAM for caching video bytes read from Cove, shared by all running videos. ffmpeg reads each video through a loopback endpoint in the worker, so its many seeks reuse one download of the header and of each byte range. `0` makes ffmpeg read from Cove directly. After each step the log shows the cache's hit rate and how much was read from Cove. |
-| `HL_H264_ENCODER` | `libx264` | Or `h264_nvenc`, `h264_qsv`, `h264_vaapi`, and so on. If a hardware encode fails, the worker falls back to libx264. |
-| `HL_HWACCEL` | – | Decode videos on the GPU with this ffmpeg hwaccel, for example `cuda` (NVIDIA), `d3d11va`, `qsv` or `vaapi`. With libav, each step keeps one GPU decoder and copies only the frames it uses to memory; `qsv` (Intel Quick Sync, Windows) decodes through the stream's Quick Sync decoder (`h264_qsv`, `hevc_qsv` …) and `HL_HWACCEL_DEVICES` picks the adapter. Quick Sync encoding is `HL_H264_ENCODER=h264_qsv`. An Intel UHD 770 saturates at about 4–8 videos at once (≈8 videos/min for 1080p H.264 with the full pipeline), two RTX cards with `cuda` + `h264_nvenc` did 24.7 at 8. With the command line, every input of the cover, preview, sprite and phash commands gets `-hwaccel`, and frame batches shrink to 6 inputs to save video memory. Decoding that fails on the GPU continues in software. If FFmpeg lacks the hwaccel, the worker decodes in software and logs a warning. On a fast CPU, software decoding of 1080p H.264 can beat the GPU; the GPU pays off for 4K and HEVC, and frees the CPU. VideoToolbox-decoded frames (and so phashes) are byte-identical to software-decoded ones; for other hwaccels, phashes have not been checked against Cove's. |
-| `HL_HWACCEL_DEVICES` | – | Comma-separated hwaccel devices (GPU indexes for `cuda`, for example `0,1`). Tasks take them in turn. |
-| `HL_FFMPEG_INPUT_ARGS` | – | Extra ffmpeg input options. The command line places them before the cover and preview inputs (they apply only to a command's first input); libav applies them to every source it opens, as demuxer/protocol options. For hardware decoding use `HL_HWACCEL`. |
-| `HL_MEDIA_ENGINE` | `auto` | `auto`: libav in-process when its libraries load, else the command line. `libav`: refuse to start without them. `cli`: always the command line. |
-| `HL_FFMPEG_LIBS` | bundled | Directory with the FFmpeg 9.0 shared libraries. By default the bundled `ffmpeg` folder (`ffmpeg/lib` on Linux), then `/opt/ffmpeg/lib`, then on macOS Homebrew's `/opt/homebrew/opt/ffmpeg/lib` and `/usr/local/opt/ffmpeg/lib`. |
-| `HL_SPRITE_SEEK` | `exact` | How sprite frames are found. `exact`: the frame at each timestamp, as Cove does. `keyframe`: the keyframe at or before it (`-noaccurate_seek -skip_frame nokey` on the command line); only keyframes are decoded, so sprites of long-GOP or 4K videos are many times faster (a 4K HEVC film: 14 s → 0.6 s per sprite with 8 videos at once), and a thumbnail can be up to one GOP (a few seconds) earlier than its time slot. The cover and phash always seek exactly. |
-| `HL_DECODE_THREADS` | auto | Decoder threads per video with libav. By default a video's share of the CPU (cores ÷ `HL_MAX_CONCURRENCY`, at most 16) for cover, sprite and phash frames, and libav's own choice for previews. |
-| `HL_FFMPEG`, `HL_FFPROBE` | bundled, else `ffmpeg`, `ffprobe` | Paths to the binaries the command line engine runs. |
+Every setting is an environment variable and a command-line flag named after it (`HL_COVE_URL` is `--cove-url http://…` or `--cove-url=http://…`); a flag wins over the variable. `--help` lists them all.
+
+| Variable | Flag | Default | Meaning |
+|---|---|---|---|
+| `HL_COVE_URL` | `--cove-url` | – | Dial Cove at this `http(s)://` address. |
+| `HL_LISTEN_URL` | `--listen-url` | – | Listen for Cove here, for example `http://0.0.0.0:8750`; Cove dials `ws://host:8750/rpc`. Set at least one of `HL_COVE_URL` and `HL_LISTEN_URL`, or both. |
+| `HL_WORKER_TOKEN` | `--worker-token` | generated | A fixed token, at least 16 characters. Without it, the worker generates one and keeps it in `HL_DATA_DIR/worker.token`. |
+| `HL_WORKER_NAME` | `--worker-name` | host name | Shown in Cove. |
+| `HL_DATA_DIR` | `--data-dir` | `./data` | Token and scratch. A step's scratch files are deleted as soon as that step ends. |
+| `HL_MAX_CONCURRENCY` | `--max-concurrency` | `cpu/4` | Videos generated at once, shared by every Cove connected to the worker. Cove also caps this per worker. |
+| `HL_SOURCE_CACHE_MB` | `--source-cache-mb` | `1024` | RAM for caching video bytes read from Cove, shared by all running videos. ffmpeg reads each video through a loopback endpoint in the worker, so its many seeks reuse one download of the header and of each byte range. `0` makes ffmpeg read from Cove directly. After each step the log shows the cache's hit rate and how much was read from Cove. |
+| `HL_H264_ENCODER` | `--h264-encoder` | `libx264` | Or `h264_nvenc`, `h264_qsv`, `h264_vaapi`, and so on. If a hardware encode fails, the worker falls back to libx264. |
+| `HL_HWACCEL` | `--hwaccel` | – | Decode videos on the GPU with this ffmpeg hwaccel, for example `cuda` (NVIDIA), `d3d11va`, `qsv` or `vaapi`. With libav, each step keeps one GPU decoder and copies only the frames it uses to memory; `qsv` (Intel Quick Sync, Windows) decodes through the stream's Quick Sync decoder (`h264_qsv`, `hevc_qsv` …) and `HL_HWACCEL_DEVICES` picks the adapter. Quick Sync encoding is `HL_H264_ENCODER=h264_qsv`. An Intel UHD 770 saturates at about 4–8 videos at once (≈8 videos/min for 1080p H.264 with the full pipeline), two RTX cards with `cuda` + `h264_nvenc` did 24.7 at 8. With the command line, every input of the cover, preview, sprite and phash commands gets `-hwaccel`, and frame batches shrink to 6 inputs to save video memory. Decoding that fails on the GPU continues in software. If FFmpeg lacks the hwaccel, the worker decodes in software and logs a warning. On a fast CPU, software decoding of 1080p H.264 can beat the GPU; the GPU pays off for 4K and HEVC, and frees the CPU. VideoToolbox-decoded frames (and so phashes) are byte-identical to software-decoded ones; for other hwaccels, phashes have not been checked against Cove's. |
+| `HL_HWACCEL_DEVICES` | `--hwaccel-devices` | – | Comma-separated hwaccel devices (GPU indexes for `cuda`, for example `0,1`). Tasks take them in turn. |
+| `HL_FFMPEG_INPUT_ARGS` | `--ffmpeg-input-args` | – | Extra ffmpeg input options. The command line places them before the cover and preview inputs (they apply only to a command's first input); libav applies them to every source it opens, as demuxer/protocol options. For hardware decoding use `HL_HWACCEL`. |
+| `HL_MEDIA_ENGINE` | `--media-engine` | `auto` | `auto`: libav in-process when its libraries load, else the command line. `libav`: refuse to start without them. `cli`: always the command line. |
+| `HL_FFMPEG_LIBS` | `--ffmpeg-libs` | bundled | Directory with the FFmpeg 9.0 shared libraries. By default the bundled `ffmpeg` folder (`ffmpeg/lib` on Linux), then `/opt/ffmpeg/lib`, then on macOS Homebrew's `/opt/homebrew/opt/ffmpeg/lib` and `/usr/local/opt/ffmpeg/lib`. |
+| `HL_SPRITE_SEEK` | `--sprite-seek` | `exact` | How sprite frames are found. `exact`: the frame at each timestamp, as Cove does. `keyframe`: the keyframe at or before it (`-noaccurate_seek -skip_frame nokey` on the command line); only keyframes are decoded, so sprites of long-GOP or 4K videos are many times faster (a 4K HEVC film: 14 s → 0.6 s per sprite with 8 videos at once), and a thumbnail can be up to one GOP (a few seconds) earlier than its time slot. The cover and phash always seek exactly. |
+| `HL_DECODE_THREADS` | `--decode-threads` | auto | Decoder threads per video with libav. By default a video's share of the CPU (cores ÷ `HL_MAX_CONCURRENCY`, at most 16) for cover, sprite and phash frames, and libav's own choice for previews. |
+| `HL_FFMPEG`, `HL_FFPROBE` | `--ffmpeg`, `--ffprobe` | bundled, else `ffmpeg`, `ffprobe` | Paths to the binaries the command line engine runs. |
+
+Reading sources directly: a worker that sees Cove's video folders on its own disk (on the same machine as Cove, or through a network share) can read source videos from there instead of over HTTP. In Cove, under the worker's settings, choose **Source videos → Directly from the worker's disk** and map each Cove folder (as Cove stores the path, for example `/media` inside Cove's container) to the same folder on the worker (for example `/srv/media`). Cove then sends each task the worker's path. A video outside the mapped folders, or one the worker cannot open at the mapped path, is read over HTTP (the worker logs a warning), and **Test** reports which way the sample video was read. Uploads always go over HTTP, and the RAM source cache is used only for HTTP reads.
 
 Networking notes:
 

@@ -1,11 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, Loader2, Plus, RefreshCw, Save, Trash2, X, Zap } from "lucide-react";
+import { useAppConfig } from "@cove/runtime/components";
 import {
   ApiError,
   api,
   queryKeys,
+  type PathMapping,
   type PendingWorker,
+  type SourceAccess,
   type WorkerHealth,
   type WorkerInput,
   type WorkerView,
@@ -24,6 +27,8 @@ interface Draft {
   coveUrlOverride: string;
   enabled: boolean;
   maxConcurrency: number;
+  sourceAccess: SourceAccess;
+  pathMappings: PathMapping[];
 }
 
 let draftCounter = 0;
@@ -42,6 +47,8 @@ function toDraft(worker: WorkerView): Draft {
     coveUrlOverride: worker.coveUrlOverride ?? "",
     enabled: worker.enabled,
     maxConcurrency: worker.maxConcurrency,
+    sourceAccess: worker.sourceAccess,
+    pathMappings: worker.pathMappings,
   };
 }
 
@@ -55,6 +62,8 @@ function toInput(draft: Draft): WorkerInput {
     coveUrlOverride: draft.coveUrlOverride.trim() || null,
     enabled: draft.enabled,
     maxConcurrency: draft.maxConcurrency,
+    sourceAccess: draft.sourceAccess,
+    pathMappings: draft.pathMappings,
   };
 }
 
@@ -135,6 +144,8 @@ export function RemoteWorkersPanel() {
         coveUrlOverride: "",
         enabled: true,
         maxConcurrency: 2,
+        sourceAccess: "http",
+        pathMappings: [],
       },
     ]);
     setDirty(true);
@@ -383,9 +394,94 @@ function WorkerCard({
             />
           </label>
         </div>
+        <SourceAccessEditor draft={draft} onChange={change} />
         <Checkbox label="Enabled" checked={draft.enabled} onChange={(enabled) => change({ enabled })} />
       </div>
     </ExpandableCard>
+  );
+}
+
+/** Over HTTP from Cove, or from the worker's own filesystem through Cove path → worker path mappings. */
+function SourceAccessEditor({ draft, onChange }: { draft: Draft; onChange: (patch: Partial<Draft>) => void }) {
+  const { config } = useAppConfig();
+  const roots = (config?.covePaths ?? []).filter((root) => !root.excludeVideo).map((root) => root.path);
+  const listId = `cove-roots-${draft.key}`;
+  const mappings = draft.pathMappings;
+  const setMapping = (index: number, patch: Partial<PathMapping>) =>
+    onChange({ pathMappings: mappings.map((mapping, i) => (i === index ? { ...mapping, ...patch } : mapping)) });
+  const addMapping = () =>
+    onChange({
+      pathMappings: [...mappings, { covePath: roots.find((root) => !mappings.some((m) => m.covePath === root)) ?? "", workerPath: "" }],
+    });
+  const setAccess = (sourceAccess: SourceAccess) =>
+    onChange(sourceAccess === "file" && mappings.length === 0 ? { sourceAccess, pathMappings: [{ covePath: roots[0] ?? "", workerPath: "" }] } : { sourceAccess });
+
+  return (
+    <div className="space-y-2">
+      <span className="text-xs text-secondary">Source videos</span>
+      <div className="flex flex-wrap gap-x-5 gap-y-1">
+        {(
+          [
+            ["http", "Over HTTP from Cove"],
+            ["file", "Directly from the worker's disk"],
+          ] as const
+        ).map(([value, label]) => (
+          <label key={value} className="flex items-center gap-2 text-sm text-secondary">
+            <input
+              type="radio"
+              name={`source-access-${draft.key}`}
+              checked={draft.sourceAccess === value}
+              onChange={() => setAccess(value)}
+              className="h-4 w-4 border-border bg-card text-accent focus:ring-0"
+            />
+            <span>{label}</span>
+          </label>
+        ))}
+      </div>
+      {draft.sourceAccess === "file" ? (
+        <div className="space-y-2">
+          <datalist id={listId}>
+            {roots.map((root) => (
+              <option key={root} value={root} />
+            ))}
+          </datalist>
+          {mappings.map((mapping, index) => (
+            <div key={index} className="flex items-center gap-2">
+              <input
+                className={inputClass}
+                list={listId}
+                value={mapping.covePath}
+                onChange={(e) => setMapping(index, { covePath: e.target.value })}
+                placeholder="Cove path, e.g. /media"
+                aria-label="Cove path"
+              />
+              <span className="text-muted">→</span>
+              <input
+                className={inputClass}
+                value={mapping.workerPath}
+                onChange={(e) => setMapping(index, { workerPath: e.target.value })}
+                placeholder="Same folder on the worker, e.g. /mnt/media"
+                aria-label="Worker path"
+              />
+              <Button
+                onClick={() => onChange({ pathMappings: mappings.filter((_, i) => i !== index) })}
+                aria-label="Remove mapping"
+              >
+                <X className="h-4 w-4" />
+              </Button>
+            </div>
+          ))}
+          <Button onClick={addMapping}>
+            <Plus className="h-4 w-4" />
+            Add mapping
+          </Button>
+          <p className="text-xs text-muted">
+            Uploads still go to Cove over HTTP. Videos outside these folders, or that the worker cannot open at the mapped
+            path, are read over HTTP.
+          </p>
+        </div>
+      ) : null}
+    </div>
   );
 }
 

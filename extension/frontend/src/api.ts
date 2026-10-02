@@ -3,6 +3,15 @@ import { extensionFetch } from "@cove/runtime/api";
 export const EXTENSION_ID = "com.cove.remote-heavylifter";
 const BASE = `/api/ext/${EXTENSION_ID}`;
 
+/** How a worker reads source videos: over HTTP from Cove, or from its own filesystem through path mappings. */
+export type SourceAccess = "http" | "file";
+
+/** A folder as Cove stores its path, and the same folder on the worker. */
+export interface PathMapping {
+  covePath: string;
+  workerPath: string;
+}
+
 /** "cove-dials" when the worker has a URL Cove connects to; "worker-dials" when Cove waits for the worker. */
 export type WorkerConnection = "cove-dials" | "worker-dials";
 
@@ -17,6 +26,8 @@ export interface WorkerView {
   enabled: boolean;
   maxConcurrency: number;
   connection: WorkerConnection;
+  sourceAccess: SourceAccess;
+  pathMappings: PathMapping[];
 }
 
 export interface WorkerInput {
@@ -28,6 +39,8 @@ export interface WorkerInput {
   coveUrlOverride: string | null;
   enabled: boolean;
   maxConcurrency: number;
+  sourceAccess: SourceAccess;
+  pathMappings: PathMapping[];
 }
 
 export interface PendingWorker {
