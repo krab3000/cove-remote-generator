@@ -85,6 +85,12 @@ public sealed class LibavPreviewTests(ClipFixture clips) : IClassFixture<ClipFix
         Assert.Equal((640, 360), (Ffmpeg.ProbeStream(_tmp["n.mp4"]).Width, Ffmpeg.ProbeStream(_tmp["n.mp4"]).Height));
         Assert.Equal(12 * 0.75, Ffmpeg.ProbeStream(_tmp["n.mp4"]).Duration, 0.3);
 
+        // Quick Sync the same way: Intel graphics, or libx264.
+        var qsv = LibavEngines.WithEncoder("h264_qsv");
+        await PreviewGenerator.GenerateAsync(qsv, Specs.Local(clips.Clip30), 30, Specs.Preview(), _tmp["q"], _tmp["q.mp4"], Ct);
+        Assert.Equal((640, 360), (Ffmpeg.ProbeStream(_tmp["q.mp4"]).Width, Ffmpeg.ProbeStream(_tmp["q.mp4"]).Height));
+        Assert.Equal(12 * 0.75, Ffmpeg.ProbeStream(_tmp["q.mp4"]).Duration, 0.3);
+
         var bogus = LibavEngines.WithEncoder("h264_definitely_not");
         await PreviewGenerator.GenerateAsync(bogus, Specs.Local(clips.Clip30), 30, Specs.Preview(preset: "ultrafast"), _tmp["b"], _tmp["b.mp4"], Ct);
         Assert.True(new FileInfo(_tmp["b.mp4"]).Length > 0);
@@ -95,9 +101,12 @@ public sealed class LibavPreviewTests(ClipFixture clips) : IClassFixture<ClipFix
     {
         var libav = LibavEngines.Require();
         Ffmpeg.RequireOrSkip();
-        var source = Specs.Local(clips.Clip30).WithHardwareDecode("cuda", null);
-        await PreviewGenerator.GenerateAsync(libav, source, 30, Specs.Preview(preset: "ultrafast"), _tmp["g"], _tmp["g.mp4"], Ct);
-        Assert.Equal(12 * 0.75, Ffmpeg.ProbeStream(_tmp["g.mp4"]).Duration, 0.3);
+        foreach (var accel in new[] { "cuda", "qsv" })
+        {
+            var source = Specs.Local(clips.Clip30).WithHardwareDecode(accel, null);
+            await PreviewGenerator.GenerateAsync(libav, source, 30, Specs.Preview(preset: "ultrafast"), _tmp[accel], _tmp[accel + ".mp4"], Ct);
+            Assert.Equal(12 * 0.75, Ffmpeg.ProbeStream(_tmp[accel + ".mp4"]).Duration, 0.3);
+        }
     }
 
     [Fact]

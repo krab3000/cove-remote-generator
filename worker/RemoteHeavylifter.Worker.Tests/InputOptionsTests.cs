@@ -163,7 +163,14 @@ public class InputOptionsTests
         var options = WorkerOptions.FromEnvironment(env.GetValueOrDefault);
         Assert.Equal("cuda", options.HwAccel);
         Assert.Equal(["0", "1"], options.HwAccelDevices);
+        Assert.False(options.SpriteKeyframes);
         Assert.Empty(options.Validate());
+
+        env["HL_SPRITE_SEEK"] = "Keyframe";
+        Assert.True(WorkerOptions.FromEnvironment(env.GetValueOrDefault).SpriteKeyframes);
+        env["HL_SPRITE_SEEK"] = "fast";
+        Assert.Contains(WorkerOptions.FromEnvironment(env.GetValueOrDefault).Validate(), e => e.Contains("HL_SPRITE_SEEK"));
+        env.Remove("HL_SPRITE_SEEK");
 
         env["HL_HWACCEL"] = "none";
         options = WorkerOptions.FromEnvironment(env.GetValueOrDefault);

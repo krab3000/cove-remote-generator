@@ -36,13 +36,14 @@ public sealed class CliMediaEngine(MediaContext ctx, ILogger? logger = null) : I
     }
 
     public async Task<Image<Rgb24>?[]> ExtractFramesAsync(
-        MediaSource source, IReadOnlyList<double> timestamps, int width, string? preFilter, string workDir, CancellationToken ct)
+        MediaSource source, IReadOnlyList<double> timestamps, int width, string? preFilter, string workDir, CancellationToken ct,
+        bool keyframes = false)
     {
         var frameDir = Path.Combine(workDir, "frames");
         var images = new Image<Rgb24>?[timestamps.Count];
         try
         {
-            var paths = await ExtractFrameFilesAsync(source, timestamps, width, preFilter, frameDir, ct);
+            var paths = await ExtractFrameFilesAsync(source, timestamps, width, preFilter, frameDir, keyframes, ct);
             for (var i = 0; i < paths.Length; i++)
             {
                 if (paths[i] is { } path)
@@ -65,7 +66,7 @@ public sealed class CliMediaEngine(MediaContext ctx, ILogger? logger = null) : I
 
     /// <summary>JPEG files for the timestamps, extracted in batches of inputs per ffmpeg; null where a frame is missing.</summary>
     private async Task<string?[]> ExtractFrameFilesAsync(
-        MediaSource source, IReadOnlyList<double> timestamps, int scaleWidth, string? preFilter, string frameDir, CancellationToken ct)
+        MediaSource source, IReadOnlyList<double> timestamps, int scaleWidth, string? preFilter, string frameDir, bool keyframes, CancellationToken ct)
     {
         Directory.CreateDirectory(frameDir);
         var length = SpriteGenerator.PerFrameArgLength(source, frameDir, timestamps.Count, scaleWidth, preFilter);
@@ -76,13 +77,13 @@ public sealed class CliMediaEngine(MediaContext ctx, ILogger? logger = null) : I
         {
             var timeout = TimeSpan.FromSeconds(60 + 6 * count);
             var result = await ProcessRunner.RunAsync(
-                [ctx.Ffmpeg, .. SpriteGenerator.SpriteBatchArgs(source, frameDir, timestamps, start, count, scaleWidth, preFilter)], timeout, ct);
+                [ctx.Ffmpeg, .. SpriteGenerator.SpriteBatchArgs(source, frameDir, timestamps, start, count, scaleWidth, preFilter, keyframes)], timeout, ct);
             if (!result.Ok && source.HardwareDecode)
             {
                 _log.LogDebug("frame batch {First}-{Last} with hardware decoding: {Summary}; retrying in software",
                     start, start + count - 1, result.Summary(200));
                 result = await ProcessRunner.RunAsync(
-                    [ctx.Ffmpeg, .. SpriteGenerator.SpriteBatchArgs(source.Software, frameDir, timestamps, start, count, scaleWidth, preFilter)],
+                    [ctx.Ffmpeg, .. SpriteGenerator.SpriteBatchArgs(source.Software, frameDir, timestamps, start, count, scaleWidth, preFilter, keyframes)],
                     timeout, ct);
             }
             if (!result.Ok)

@@ -23,13 +23,18 @@ public static class SpriteGenerator
     }
 
     internal static List<string> SpriteBatchArgs(
-        MediaSource source, string frameDir, IReadOnlyList<double> timestamps, int start, int count, int scaleWidth, string? preFilter)
+        MediaSource source, string frameDir, IReadOnlyList<double> timestamps, int start, int count, int scaleWidth, string? preFilter,
+        bool keyframes = false)
     {
         List<string> args = ["-v", "error", "-y"];
         for (var offset = 0; offset < count; offset++)
         {
             var seconds = Math.Max(0.0, timestamps[start + offset]);
-            args.AddRange(["-threads", "1", "-ss", Timing.Fixed(seconds, 3), .. source.Input()]);
+            args.AddRange(["-threads", "1"]);
+            // Fast seek: the keyframe the seek lands on, and the decoder skips everything else.
+            if (keyframes)
+                args.AddRange(["-noaccurate_seek", "-skip_frame", "nokey"]);
+            args.AddRange(["-ss", Timing.Fixed(seconds, 3), .. source.Input()]);
         }
         var filters = new[] { preFilter, scaleWidth > 0 ? string.Create(CultureInfo.InvariantCulture, $"scale={scaleWidth}:-2") : null }
             .Where(f => !string.IsNullOrEmpty(f))
@@ -46,13 +51,13 @@ public static class SpriteGenerator
 
     public static async Task GenerateAsync(
         IMediaEngine engine, MediaSource src, double duration, SpriteSpec spec, string workDir, string spriteOutput, string vttOutput,
-        CancellationToken ct)
+        CancellationToken ct, bool keyframes = false)
     {
         if (duration <= 0)
             throw new MediaException("sprite: unknown duration");
         var plan = Timing.PlanSprite(duration, spec.MaxFrames);
         Directory.CreateDirectory(workDir);
-        var frames = await engine.ExtractFramesAsync(src, plan.Timestamps, spec.FrameWidth, spec.PreFilter, workDir, ct);
+        var frames = await engine.ExtractFramesAsync(src, plan.Timestamps, spec.FrameWidth, spec.PreFilter, workDir, ct, keyframes);
         try
         {
             var sources = Timing.FillGaps(frames.Select(f => f is not null).ToList())

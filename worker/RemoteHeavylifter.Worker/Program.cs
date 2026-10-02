@@ -113,10 +113,11 @@ var engine = app.Services.GetRequiredService<IMediaEngine>();
 
 log.LogInformation("Remote Heavylifter worker {Version} \"{Name}\": worker ID {Id} (token from {Source})",
     WorkerFacts.Version, options.Name, token.Id, token.Source);
-log.LogInformation("{Capacity} parallel videos, encoder {Encoder}, decoding {Decode}, source cache {Cache}, {Ffmpeg}",
+log.LogInformation("{Capacity} parallel videos, encoder {Encoder}, decoding {Decode}, sprite seek {SpriteSeek}, source cache {Cache}, {Ffmpeg}",
     options.MaxConcurrency, options.Encoder,
     options.HwAccel is null ? "software"
         : options.HwAccelDevices.Count > 0 ? $"{options.HwAccel} on devices {string.Join(", ", options.HwAccelDevices)}" : options.HwAccel,
+    options.SpriteSeek,
     options.SourceCacheMb > 0 ? $"{options.SourceCacheMb} MB" : "off",
     facts.FfmpegVersion ?? "ffmpeg NOT FOUND");
 log.LogInformation("Media engine: {Engine}", engine.Description);

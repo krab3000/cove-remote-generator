@@ -8,8 +8,10 @@ namespace RemoteHeavylifter.Worker.Media.Libav;
 /// <param name="SliceThreads">Slice threading only: frame threading delays every frame after a seek by a frame per thread.</param>
 /// <param name="Lenient">The cover's <c>-fflags +discardcorrupt -err_detect ignore_err</c>.</param>
 /// <param name="FormatOptions">Extra demuxer/protocol options (from HL_FFMPEG_INPUT_ARGS).</param>
+/// <param name="KeyframesOnly">The decoder skips every frame but keyframes (fast seek).</param>
 internal sealed record DecodeSettings(
-    int Threads, bool SliceThreads, bool Lenient = false, IReadOnlyList<KeyValuePair<string, string>>? FormatOptions = null);
+    int Threads, bool SliceThreads, bool Lenient = false, IReadOnlyList<KeyValuePair<string, string>>? FormatOptions = null,
+    bool KeyframesOnly = false);
 
 /// <summary>
 /// One opened source and a decoder for its main video stream (on the GPU when the source asks for it). Frames come out
@@ -128,6 +130,10 @@ internal sealed unsafe class LibavInput : IDisposable
                 _fmt->streams[i]->discard = AVDiscard.AVDISCARD_ALL;
         }
 
+        // Quick Sync decodes through its own decoders (h264_qsv …), not as a hwaccel of the native ones.
+        if (source.HwDecode is { Accel: "qsv" } && QsvDecoder(codec) is var qsv && qsv is not null)
+            codec = qsv;
+
         _dec = ffmpeg.avcodec_alloc_context3(codec);
         if (_dec is null)
             throw new MediaException($"{what}: out of memory");
@@ -143,6 +149,9 @@ internal sealed unsafe class LibavInput : IDisposable
                 _dec->thread_type = ffmpeg.FF_THREAD_SLICE;
         }
 
+        if (settings.KeyframesOnly)
+            _dec->skip_frame = AVDiscard.AVDISCARD_NONKEY;
+
         var options = Av.Dictionary(settings.Lenient ? [new("err_detect", "ignore_err")] : []);
         var ret = ffmpeg.avcodec_open2(_dec, codec, &options);
         Av.Free(options);
@@ -155,6 +164,15 @@ internal sealed unsafe class LibavInput : IDisposable
         _transfer = ffmpeg.av_frame_alloc();
         if (_packet is null || _decoded is null || _transfer is null)
             throw new MediaException($"{what}: out of memory");
+    }
+
+    /// <summary>The Quick Sync decoder for a stream's codec (h264 → h264_qsv, mpeg2video → mpeg2_qsv …); null when there is none.</summary>
+    private static AVCodec* QsvDecoder(AVCodec* native)
+    {
+        if (native is null)
+            return null;
+        var name = Name(native);
+        return ffmpeg.avcodec_find_decoder_by_name((name == "mpeg2video" ? "mpeg2" : name) + "_qsv");
     }
 
     private void SetUpHardware(AVCodec* codec, string accel, string? device, string what)
@@ -178,8 +196,11 @@ internal sealed unsafe class LibavInput : IDisposable
             }
         }
 
+        // A QSV device is opened on a D3D11/VA-API adapter: the device index names that adapter.
+        var options = type == AVHWDeviceType.AV_HWDEVICE_TYPE_QSV && device is not null ? Av.Dictionary([new("child_device", device)]) : null;
         AVBufferRef* hwDevice = null;
-        var ret = ffmpeg.av_hwdevice_ctx_create(&hwDevice, type, device, null, 0);
+        var ret = ffmpeg.av_hwdevice_ctx_create(&hwDevice, type, options is null ? device : null, options, 0);
+        Av.Free(options);
         if (ret < 0)
         {
             _hwFormat = AVPixelFormat.AV_PIX_FMT_NONE;
@@ -238,6 +259,17 @@ internal sealed unsafe class LibavInput : IDisposable
                 return Download(frame, what);
         }
         return null;
+    }
+
+    /// <summary>
+    /// Fast seek (with <see cref="DecodeSettings.KeyframesOnly"/>): the keyframe the seek to <paramref name="targetUs"/>
+    /// lands on, i.e. the last one at or before it, like <c>-noaccurate_seek</c>. Null past the end.
+    /// </summary>
+    public AVFrame* KeyframeAt(long targetUs, string what)
+    {
+        Seek(targetUs, what);
+        var frame = NextFrame(what, download: false);
+        return frame is null ? null : Download(frame, what);
     }
 
     /// <summary>The next decoded frame, or null at the end of the stream. With <paramref name="download"/> (the
@@ -325,7 +357,10 @@ internal sealed unsafe class LibavInput : IDisposable
     /// </summary>
     public string? SoftwareFormatFilter(AVFrame* frame)
     {
-        var software = _dec->sw_pix_fmt;
+        // The stream's own format (what the software decoder gives): a QSV decoder reports NV12 as its software format.
+        var software = (AVPixelFormat)Stream->codecpar->format;
+        if (software == AVPixelFormat.AV_PIX_FMT_NONE)
+            software = _dec->sw_pix_fmt;
         if (software == AVPixelFormat.AV_PIX_FMT_NONE || (AVPixelFormat)frame->format == software)
             return null;
         var name = ffmpeg.av_get_pix_fmt_name(software);

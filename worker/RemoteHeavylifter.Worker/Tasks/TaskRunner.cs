@@ -227,7 +227,7 @@ public sealed class TaskRunner(
             {
                 var sprite = Path.Combine(stepDir, "sprite.jpg");
                 var vtt = Path.Combine(stepDir, "thumbs.vtt");
-                await SpriteGenerator.GenerateAsync(engine, source, duration, request.Sprite!, stepDir, sprite, vtt, ct);
+                await SpriteGenerator.GenerateAsync(engine, source, duration, request.Sprite!, stepDir, sprite, vtt, ct, options.SpriteKeyframes);
                 artifacts[ArtifactKinds.Sprite] = await UploadAsync(request, ArtifactKinds.Sprite, sprite, ct);
                 artifacts[ArtifactKinds.Vtt] = await UploadAsync(request, ArtifactKinds.Vtt, vtt, ct);
                 break;

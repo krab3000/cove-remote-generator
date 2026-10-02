@@ -40,6 +40,12 @@ public sealed record WorkerOptions
     /// <summary>Decoder threads per video for the libav engine; null chooses per operation.</summary>
     public int? DecodeThreads { get; init; }
 
+    /// <summary>How sprite frames are found: <c>exact</c> (the frame at each timestamp, as Cove does) or <c>keyframe</c>
+    /// (the keyframe at or before it: only keyframes are decoded, many times faster, up to a GOP earlier).</summary>
+    public string SpriteSeek { get; init; } = "exact";
+
+    public bool SpriteKeyframes => SpriteSeek == "keyframe";
+
     /// <summary>RAM for source bytes shared by all running tasks; 0 makes ffmpeg read straight from Cove.</summary>
     public int SourceCacheMb { get; init; } = 1024;
 
@@ -71,6 +77,7 @@ public sealed record WorkerOptions
             HwAccelDevices = Get("HL_HWACCEL_DEVICES")?.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries) ?? [],
             MediaEngine = Get("HL_MEDIA_ENGINE")?.ToLowerInvariant() ?? defaults.MediaEngine,
             FfmpegLibs = Get("HL_FFMPEG_LIBS"),
+            SpriteSeek = Get("HL_SPRITE_SEEK")?.ToLowerInvariant() ?? defaults.SpriteSeek,
             DecodeThreads = int.TryParse(Get("HL_DECODE_THREADS"), NumberStyles.Integer, CultureInfo.InvariantCulture, out var threads) && threads > 0
                 ? threads
                 : null,
@@ -90,6 +97,8 @@ public sealed record WorkerOptions
             errors.Add("HL_LISTEN_URL must be an http:// or https:// address, e.g. http://0.0.0.0:8750.");
         if (CoveUrl is not null && !IsHttp(CoveUrl))
             errors.Add("HL_COVE_URL must be Cove's http:// or https:// address, e.g. http://192.168.1.10:5073.");
+        if (SpriteSeek is not ("exact" or "keyframe"))
+            errors.Add("HL_SPRITE_SEEK must be exact or keyframe.");
         if (MediaEngine is not ("auto" or "libav" or "cli"))
             errors.Add("HL_MEDIA_ENGINE must be auto, libav or cli.");
         if (HwAccelDevices.Count > 0 && HwAccel is null)

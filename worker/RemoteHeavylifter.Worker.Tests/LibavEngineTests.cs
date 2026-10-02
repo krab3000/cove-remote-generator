@@ -147,15 +147,15 @@ public sealed class LibavEngineTests(ClipFixture clips) : IClassFixture<ClipFixt
         var clip = Ffmpeg.MakeLevelsClip(_tmp["levels.mp4"], 10);
         var timestamps = Timing.PlanSprite(10).Timestamps;
         var software = await Frames(libav, Specs.Local(clip), timestamps, _tmp["sw"]);
-        // cuda on the default GPU (software when there is none), and a device that cannot exist.
-        foreach (var device in new string?[] { null, "99" })
+        // cuda and Quick Sync on the default GPU (software when there is none), and a device that cannot exist.
+        foreach (var (accel, device) in new (string, string?)[] { ("cuda", null), ("cuda", "99"), ("qsv", null), ("qsv", "99") })
         {
-            var hardware = await Frames(libav, Specs.Local(clip).WithHardwareDecode("cuda", device), timestamps, _tmp["hw"]);
+            var hardware = await Frames(libav, Specs.Local(clip).WithHardwareDecode(accel, device), timestamps, _tmp["hw"]);
             for (var i = 0; i < timestamps.Count; i++)
             {
                 Assert.Equal((software[i]!.Width, software[i]!.Height), (hardware[i]!.Width, hardware[i]!.Height));
                 Assert.True(Math.Abs(Mean(software[i]!) - Mean(hardware[i]!)) < 1.5,
-                    $"device {device ?? "default"} at {timestamps[i]} s: software {Mean(software[i]!):F2}, gpu {Mean(hardware[i]!):F2}");
+                    $"{accel} device {device ?? "default"} at {timestamps[i]} s: software {Mean(software[i]!):F2}, gpu {Mean(hardware[i]!):F2}");
                 hardware[i]!.Dispose();
             }
         }

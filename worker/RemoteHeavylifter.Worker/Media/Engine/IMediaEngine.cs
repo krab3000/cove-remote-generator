@@ -22,8 +22,11 @@ public interface IMediaEngine
 
     /// <summary>One frame per timestamp, scaled to <paramref name="width"/> (after <paramref name="preFilter"/>); null
     /// where no frame could be decoded. The caller disposes the images.</summary>
+    /// <param name="keyframes">Fast seek: the keyframe at or before each timestamp instead of the exact frame (up to a GOP
+    /// earlier, but only keyframes are decoded).</param>
     Task<Image<Rgb24>?[]> ExtractFramesAsync(
-        MediaSource source, IReadOnlyList<double> timestamps, int width, string? preFilter, string workDir, CancellationToken ct);
+        MediaSource source, IReadOnlyList<double> timestamps, int width, string? preFilter, string workDir, CancellationToken ct,
+        bool keyframes = false);
 
     /// <summary>Encodes the preview described by <paramref name="plan"/> to <paramref name="output"/> (MP4).</summary>
     Task PreviewAsync(

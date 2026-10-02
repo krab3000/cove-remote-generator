@@ -163,33 +163,46 @@ public sealed class LibavMediaEngine : IMediaEngine
     }, ct);
 
     public Task<Image<Rgb24>?[]> ExtractFramesAsync(
-        MediaSource source, IReadOnlyList<double> timestamps, int width, string? preFilter, string workDir, CancellationToken ct) => Run(() =>
+        MediaSource source, IReadOnlyList<double> timestamps, int width, string? preFilter, string workDir, CancellationToken ct,
+        bool keyframes = false) => Run(() =>
     {
         const string what = "frames";
         using var interrupt = new Interrupt(ct, TimeSpan.FromSeconds(60 + 6 * timestamps.Count), what);
-        var settings = new DecodeSettings(FrameThreads, SliceThreads: false, FormatOptions: _options.FormatOptions);
+        // Fast seek decodes one frame per seek: slice threads, as frame threads would delay each by a frame per thread.
+        var settings = new DecodeSettings(FrameThreads, SliceThreads: keyframes, FormatOptions: _options.FormatOptions, KeyframesOnly: keyframes);
         var images = new Image<Rgb24>?[timestamps.Count];
         var input = Open(source, settings, interrupt, what);
         try
         {
             var scale = width > 0 ? $"scale={width}:-2" : null;
+            long? lastKeyframe = null;
+            Image<Rgb24>? lastImage = null;
             // Ascending, so the decoder only ever moves forward (callers already pass them in order).
             foreach (var i in Enumerable.Range(0, timestamps.Count).OrderBy(i => timestamps[i]))
             {
                 unsafe
                 {
                     var target = SeekPlanner.TargetMicroseconds(Math.Max(0, timestamps[i]), 3, input.StartMicroseconds);
+                    // Index entries are compared with each other (an MP4 index holds decode times, not frame times).
+                    var keyframe = keyframes ? input.KeyframeAtOrBefore(input.ToStream(target)) : null;
+                    if (keyframe is not null && keyframe == lastKeyframe && lastImage is not null)
+                    {
+                        // Lands on the keyframe the previous timestamp did: the same picture, without seeking again.
+                        images[i] = lastImage.Clone();
+                        continue;
+                    }
+
                     AVFrame* frame;
                     try
                     {
-                        frame = input.FrameAt(target, what);
+                        frame = keyframes ? input.KeyframeAt(target, what) : input.FrameAt(target, what);
                     }
                     catch (HardwareDecodeException ex) when (input.OnGpu)
                     {
                         _log.LogDebug("{Error}; decoding in software", ex.Message);
                         input.Dispose();
                         input = Open(source.Software, settings, interrupt, what);
-                        frame = input.FrameAt(target, what);
+                        frame = keyframes ? input.KeyframeAt(target, what) : input.FrameAt(target, what);
                     }
                     if (frame is null)
                         continue;
@@ -200,6 +213,8 @@ public sealed class LibavMediaEngine : IMediaEngine
                     {
                         rgb = FilterChain.RunOnce(frame, input.TimeBase, chain, 1, what);
                         images[i] = Frames.ToImage(rgb);
+                        lastKeyframe = keyframe;
+                        lastImage = images[i];
                     }
                     catch (MediaException ex)
                     {
