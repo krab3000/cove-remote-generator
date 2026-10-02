@@ -9,9 +9,10 @@ namespace RemoteHeavylifter.Worker.Media.Libav;
 /// <param name="Lenient">The cover's <c>-fflags +discardcorrupt -err_detect ignore_err</c>.</param>
 /// <param name="FormatOptions">Extra demuxer/protocol options (from HL_FFMPEG_INPUT_ARGS).</param>
 /// <param name="KeyframesOnly">The decoder skips every frame but keyframes (fast seek).</param>
+/// <param name="HwSkipCodecs">Codecs decoded in software even when the source asks for the GPU.</param>
 internal sealed record DecodeSettings(
     int Threads, bool SliceThreads, bool Lenient = false, IReadOnlyList<KeyValuePair<string, string>>? FormatOptions = null,
-    bool KeyframesOnly = false);
+    bool KeyframesOnly = false, IReadOnlyList<string>? HwSkipCodecs = null);
 
 /// <summary>
 /// One opened source and a decoder for its main video stream (on the GPU when the source asks for it). Frames come out
@@ -130,8 +131,16 @@ internal sealed unsafe class LibavInput : IDisposable
                 _fmt->streams[i]->discard = AVDiscard.AVDISCARD_ALL;
         }
 
+        // The GPU only for codecs it is not told to skip (decoders libav has but that fail, such as vc1_qsv).
+        var hw = source.HwDecode;
+        if (hw is { } asked && settings.HwSkipCodecs?.Contains(Name(codec), StringComparer.OrdinalIgnoreCase) == true)
+        {
+            _log.LogDebug("{What}: {Codec} is decoded in software (skipped for {Accel})", what, Name(codec), asked.Accel);
+            hw = null;
+        }
+
         // Quick Sync decodes through its own decoders (h264_qsv …), not as a hwaccel of the native ones.
-        if (source.HwDecode is { Accel: "qsv" } && QsvDecoder(codec) is var qsv && qsv is not null)
+        if (hw is { Accel: "qsv" } && QsvDecoder(codec) is var qsv && qsv is not null)
             codec = qsv;
 
         _dec = ffmpeg.avcodec_alloc_context3(codec);
@@ -140,8 +149,8 @@ internal sealed unsafe class LibavInput : IDisposable
         ffmpeg.avcodec_parameters_to_context(_dec, Stream->codecpar).Check($"{what}: decoder parameters");
         _dec->pkt_timebase = Stream->time_base;
 
-        if (source.HwDecode is { } hw)
-            SetUpHardware(codec, hw.Accel, hw.Device, what);
+        if (hw is { } gpu)
+            SetUpHardware(codec, gpu.Accel, gpu.Device, what);
         if (!OnGpu)
         {
             _dec->thread_count = settings.Threads;
@@ -249,17 +258,36 @@ internal sealed unsafe class LibavInput : IDisposable
     {
         var target = ToStream(targetUs);
         var reach = ToStream((long)(SeekPlanner.NoIndexForwardSeconds * 1_000_000)) - ToStream(0);
-        if (SeekPlanner.ShouldSeek(Position, KeyframeAtOrBefore(target), target, reach))
-            Seek(targetUs, what);
-        AVFrame* frame;
         // Frames on the way to the target stay on the GPU: only the one handed out is copied to memory.
-        while ((frame = NextFrame(what, download: false)) is not null)
+        var frame = SeekPlanner.ShouldSeek(Position, KeyframeAtOrBefore(target), target, reach)
+            ? SeekNotPast(targetUs, target, what)
+            : NextFrame(what, download: false);
+        while (frame is not null)
         {
             if (frame->pts == ffmpeg.AV_NOPTS_VALUE || frame->pts >= target)
                 return Download(frame, what);
+            frame = NextFrame(what, download: false);
         }
         return null;
     }
+
+    /// <summary>Seeks for <paramref name="target"/> and returns the first frame after the seek. Some demuxers land past
+    /// the target (ASF/WMV without an index, by seconds): then this seeks further back, 5 s and doubling up to
+    /// <see cref="MaxSeekBackUs"/>, so the target frame is decoded rather than skipped.</summary>
+    private AVFrame* SeekNotPast(long targetUs, long target, string what)
+    {
+        for (var back = 0L; ; back = back == 0 ? 5_000_000 : back * 2)
+        {
+            var at = Math.Max(targetUs - back, StartMicroseconds);
+            Seek(at, what);
+            var frame = NextFrame(what, download: false);
+            if (frame is null || frame->pts == ffmpeg.AV_NOPTS_VALUE || frame->pts <= target || at == StartMicroseconds || back >= MaxSeekBackUs)
+                return frame;
+            _log.LogDebug("{What}: seek to {Target} µs landed at pts {Pts}; seeking {Back} s earlier", what, targetUs, frame->pts, (back == 0 ? 5_000_000 : back * 2) / 1_000_000);
+        }
+    }
+
+    private const long MaxSeekBackUs = 80_000_000;
 
     /// <summary>
     /// Fast seek (with <see cref="DecodeSettings.KeyframesOnly"/>): the keyframe the seek to <paramref name="targetUs"/>

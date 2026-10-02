@@ -26,20 +26,7 @@ public sealed class VideoToolboxTests(ClipFixture clips) : IClassFixture<ClipFix
         return new LibavMediaEngine(info!, new LibavEngineOptions(null, 1, encoder, []), Engines.Cli, _log);
     }
 
-    private void AssertNoFallback()
-        => Assert.DoesNotContain(_log.Messages, m => m.Contains("in software", StringComparison.Ordinal) || m.Contains("libx264", StringComparison.Ordinal));
-
-    private sealed class RecordingLogger : ILogger
-    {
-        public readonly ConcurrentQueue<string> Messages = new();
-
-        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
-
-        public bool IsEnabled(LogLevel logLevel) => true;
-
-        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
-            => Messages.Enqueue(formatter(state, exception));
-    }
+    private void AssertNoFallback() => _log.AssertNoFallback();
 
     [Fact]
     public async Task Hardware_decoded_phash_matches_software()

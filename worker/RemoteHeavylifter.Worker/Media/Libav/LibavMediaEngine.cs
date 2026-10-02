@@ -11,8 +11,10 @@ namespace RemoteHeavylifter.Worker.Media.Libav;
 /// <param name="DecodeThreads">Decoder threads; null picks per operation (see <see cref="LibavMediaEngine"/>).</param>
 /// <param name="Concurrency">Videos the worker generates at once, which share the CPU.</param>
 /// <param name="FormatOptions">HL_FFMPEG_INPUT_ARGS as demuxer/protocol options.</param>
+/// <param name="HwSkipCodecs">Codecs (libav names: vc1, hevc …) decoded in software even when the source asks for the GPU.</param>
 public sealed record LibavEngineOptions(
-    int? DecodeThreads, int Concurrency, string Encoder, IReadOnlyList<KeyValuePair<string, string>> FormatOptions);
+    int? DecodeThreads, int Concurrency, string Encoder, IReadOnlyList<KeyValuePair<string, string>> FormatOptions,
+    IReadOnlyList<string>? HwSkipCodecs = null);
 
 /// <summary>
 /// libav in this process: each step opens its source once and keeps one decoder (on the GPU when asked), seeks only when
@@ -105,7 +107,8 @@ public sealed class LibavMediaEngine : IMediaEngine
     {
         const string what = "cover";
         using var interrupt = new Interrupt(ct, Timing.FrameDecodeTimeout(source.Size), what);
-        var settings = new DecodeSettings(FrameThreads, SliceThreads: false, Lenient: true, _options.FormatOptions);
+        var settings = new DecodeSettings(FrameThreads, SliceThreads: false, Lenient: true, _options.FormatOptions,
+            HwSkipCodecs: _options.HwSkipCodecs);
         var input = Open(source, settings, interrupt, what);
         try
         {
@@ -169,7 +172,8 @@ public sealed class LibavMediaEngine : IMediaEngine
         const string what = "frames";
         using var interrupt = new Interrupt(ct, TimeSpan.FromSeconds(60 + 6 * timestamps.Count), what);
         // Fast seek decodes one frame per seek: slice threads, as frame threads would delay each by a frame per thread.
-        var settings = new DecodeSettings(FrameThreads, SliceThreads: keyframes, FormatOptions: _options.FormatOptions, KeyframesOnly: keyframes);
+        var settings = new DecodeSettings(FrameThreads, SliceThreads: keyframes, FormatOptions: _options.FormatOptions, KeyframesOnly: keyframes,
+            HwSkipCodecs: _options.HwSkipCodecs);
         var images = new Image<Rgb24>?[timestamps.Count];
         var input = Open(source, settings, interrupt, what);
         try
@@ -247,7 +251,8 @@ public sealed class LibavMediaEngine : IMediaEngine
         var timeout = plan.Mode == PreviewMode.Chunks ? TimeSpan.FromSeconds(Math.Min(900, 60 * plan.SegmentCount)) : TimeSpan.FromSeconds(300);
         using var interrupt = new Interrupt(ct, timeout, "preview");
         // One decoder for the whole preview: libav picks the threads, frame threading included.
-        var settings = new DecodeSettings(_options.DecodeThreads ?? 0, SliceThreads: false, FormatOptions: _options.FormatOptions);
+        var settings = new DecodeSettings(_options.DecodeThreads ?? 0, SliceThreads: false, FormatOptions: _options.FormatOptions,
+            HwSkipCodecs: _options.HwSkipCodecs);
         var encoder = _options.Encoder;
         try
         {

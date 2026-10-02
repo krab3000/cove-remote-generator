@@ -27,6 +27,10 @@ if (argErrors.Concat(options.Validate()).ToList() is { Count: > 0 } errors)
 
 var token = WorkerToken.Load(options);
 
+// libva prints "libva info: …" for every VA-API connection (Quick Sync's runtime opens its own, past FFmpeg's log
+// callback); errors only, unless set by the user. Before any libva connection is made.
+NativeEnvironment.SetDefault("LIBVA_MESSAGING_LEVEL", "1");
+
 // libav in this process when its libraries load (HL_MEDIA_ENGINE=auto|libav), else ffmpeg/ffprobe processes.
 var warnings = new List<string>();
 LibavInfo? libav = null;
@@ -99,7 +103,8 @@ builder.Services.AddSingleton<IMediaEngine>(sp =>
     var mediaLog = loggers.CreateLogger("Media");
     var formatOptions = LibavMediaEngine.FormatOptionsFrom(options.FfmpegInputArgs,
         ignored => mediaLog.LogWarning("HL_FFMPEG_INPUT_ARGS: -{Option} is ignored by the libav engine; use HL_HWACCEL", ignored));
-    return new LibavMediaEngine(libav, new LibavEngineOptions(options.DecodeThreads, options.MaxConcurrency, options.Encoder, formatOptions), cli, mediaLog);
+    return new LibavMediaEngine(libav, new LibavEngineOptions(options.DecodeThreads, options.MaxConcurrency, options.Encoder, formatOptions,
+        options.HwSkipCodecs), cli, mediaLog);
 });
 builder.Services.AddSingleton<TaskRunner>();
 builder.Services.AddSingleton<WorkerFacts>();

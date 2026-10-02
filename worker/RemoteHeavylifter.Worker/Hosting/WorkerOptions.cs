@@ -31,6 +31,16 @@ public sealed record WorkerOptions
     /// <summary>Hardware decoding devices (e.g. GPU indexes 0 and 1); tasks take them in turn. Empty uses ffmpeg's default.</summary>
     public IReadOnlyList<string> HwAccelDevices { get; init; } = [];
 
+    /// <summary>Codecs decoded in software even with <see cref="HwAccel"/>; null means <see cref="DefaultHwSkipCodecs"/>.</summary>
+    public IReadOnlyList<string>? HwAccelSkipCodecs { get; init; }
+
+    /// <summary>The codecs actually decoded in software: <see cref="HwAccelSkipCodecs"/>, or the hwaccel's known-broken ones.</summary>
+    public IReadOnlyList<string> HwSkipCodecs => HwAccelSkipCodecs ?? DefaultHwSkipCodecs(HwAccel);
+
+    /// <summary>Decoders libav has that crash the process: FFmpeg's vc1_qsv segfaults (FFmpeg 9.0, Intel media
+    /// runtime 23.2 and 26.3).</summary>
+    public static IReadOnlyList<string> DefaultHwSkipCodecs(string? hwAccel) => hwAccel == "qsv" ? ["vc1"] : [];
+
     /// <summary>How video is read and encoded: <c>auto</c> (libav in-process when its libraries load, else the command
     /// line), <c>libav</c> (required) or <c>cli</c> (ffmpeg/ffprobe processes).</summary>
     public string MediaEngine { get; init; } = "auto";
@@ -67,6 +77,7 @@ public sealed record WorkerOptions
         ("HL_H264_ENCODER", "Preview encoder, e.g. h264_nvenc, h264_qsv. Default: libx264."),
         ("HL_HWACCEL", "Decode on the GPU with this ffmpeg hwaccel, e.g. cuda, qsv, vaapi; none decodes in software."),
         ("HL_HWACCEL_DEVICES", "Comma-separated hwaccel devices that tasks take in turn, e.g. 0,1."),
+        ("HL_HWACCEL_SKIP_CODECS", "Comma-separated codecs decoded in software even with a hwaccel, e.g. vc1,mpeg2video; none skips nothing. Default: vc1 for qsv, else none."),
         ("HL_FFMPEG_INPUT_ARGS", "Extra ffmpeg input options, separated by spaces."),
         ("HL_MEDIA_ENGINE", "auto, libav or cli. Default: auto."),
         ("HL_FFMPEG_LIBS", "Directory with the FFmpeg shared libraries. Default: the bundled ffmpeg folder."),
@@ -142,6 +153,11 @@ public sealed record WorkerOptions
             Encoder = Get("HL_H264_ENCODER") ?? defaults.Encoder,
             HwAccel = Get("HL_HWACCEL") is { } accel && !accel.Equals("none", StringComparison.OrdinalIgnoreCase) ? accel : null,
             HwAccelDevices = Get("HL_HWACCEL_DEVICES")?.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries) ?? [],
+            HwAccelSkipCodecs = Get("HL_HWACCEL_SKIP_CODECS") is { } skip
+                ? skip.Equals("none", StringComparison.OrdinalIgnoreCase)
+                    ? []
+                    : skip.ToLowerInvariant().Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                : null,
             MediaEngine = Get("HL_MEDIA_ENGINE")?.ToLowerInvariant() ?? defaults.MediaEngine,
             FfmpegLibs = Get("HL_FFMPEG_LIBS"),
             SpriteSeek = Get("HL_SPRITE_SEEK")?.ToLowerInvariant() ?? defaults.SpriteSeek,

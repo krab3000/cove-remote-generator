@@ -276,3 +276,21 @@ internal sealed class CacheHost : IAsyncDisposable
         _upstream.Dispose();
     }
 }
+
+/// <summary>Keeps every log message, so a test can tell real GPU work from a silent software fallback.</summary>
+internal sealed class RecordingLogger : Microsoft.Extensions.Logging.ILogger
+{
+    public readonly System.Collections.Concurrent.ConcurrentQueue<string> Messages = new();
+
+    public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+    public bool IsEnabled(Microsoft.Extensions.Logging.LogLevel logLevel) => true;
+
+    public void Log<TState>(Microsoft.Extensions.Logging.LogLevel logLevel, Microsoft.Extensions.Logging.EventId eventId, TState state,
+        Exception? exception, Func<TState, Exception?, string> formatter)
+        => Messages.Enqueue(formatter(state, exception));
+
+    /// <summary>Fails when anything fell back to software decoding or libx264.</summary>
+    public void AssertNoFallback()
+        => Assert.DoesNotContain(Messages, m => m.Contains("in software", StringComparison.Ordinal) || m.Contains("libx264", StringComparison.Ordinal));
+}

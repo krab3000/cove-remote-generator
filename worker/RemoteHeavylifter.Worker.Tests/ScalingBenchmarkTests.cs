@@ -10,7 +10,7 @@ namespace RemoteHeavylifter.Worker.Tests;
 /// <summary>
 /// Opt-in benchmark: how throughput scales with videos at once, per GPU setup (Intel Quick Sync; NVIDIA CUDA + NVENC on
 /// two GPUs). For each count in HL_BENCH_COUNTS (default 1,2,4,8,12,16), HL_BENCH_JOBS or max(8, 2×count) videos (HL_BENCH_FILE each
-/// time) run the worker's steps (cover → preview → sprite → phash). HL_BENCH_SETUPS (qsv, cuda; default both) picks
+/// time) run the worker's steps (cover → preview → sprite → phash). HL_BENCH_SETUPS (qsv, vaapi, cuda; default all) picks
 /// the setups. Results are appended to HL_BENCH_OUT/results.txt; without HL_BENCH_FILE and HL_BENCH_OUT the test skips.
 /// </summary>
 public sealed class ScalingBenchmarkTests
@@ -52,6 +52,7 @@ public sealed class ScalingBenchmarkTests
         var setups = new (string Name, string Accel, string[] Devices, string Encoder)[]
         {
             ("intel qsv", "qsv", [], "h264_qsv"),
+            ("intel vaapi", "vaapi", [], "h264_vaapi"),
             ("nvidia cuda+nvenc (2 GPUs)", "cuda", ["0", "1"], "h264_nvenc"),
         };
         var picked = Environment.GetEnvironmentVariable("HL_BENCH_SETUPS")?.Split(',');

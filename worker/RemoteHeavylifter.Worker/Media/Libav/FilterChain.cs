@@ -70,30 +70,36 @@ internal sealed unsafe class FilterChain : IDisposable
             .Check($"{what}: filter output");
         _sink = sink;
 
-        var outputs = ffmpeg.avfilter_inout_alloc();
-        var inputs = ffmpeg.avfilter_inout_alloc();
+        // What avfilter_graph_parse_ptr does, step by step: a filter that uploads to the GPU (hwupload) needs its device
+        // before it is initialised, and parse_ptr initialises filters as it creates them.
+        var error = $"{what}: filter \"{chain}\"";
+        AVFilterGraphSegment* segment = null;
+        AVFilterInOut* inputs = null;
+        AVFilterInOut* outputs = null;
         try
         {
-            outputs->name = ffmpeg.av_strdup("in");
-            outputs->filter_ctx = _source;
-            outputs->pad_idx = 0;
-            outputs->next = null;
-            inputs->name = ffmpeg.av_strdup("out");
-            inputs->filter_ctx = _sink;
-            inputs->pad_idx = 0;
-            inputs->next = null;
-            ffmpeg.avfilter_graph_parse_ptr(_graph, chain.Length == 0 ? "null" : chain, &inputs, &outputs, null)
-                .Check($"{what}: filter \"{chain}\"");
+            ffmpeg.avfilter_graph_segment_parse(_graph, chain.Length == 0 ? "null" : chain, 0, &segment).Check(error);
+            var before = (int)_graph->nb_filters; // the buffer source and sink
+            ffmpeg.avfilter_graph_segment_create_filters(segment, 0).Check(error);
+            if (hwDevice is not null)
+            {
+                for (var i = before; i < (int)_graph->nb_filters; i++)
+                    _graph->filters[i]->hw_device_ctx = ffmpeg.av_buffer_ref(hwDevice);
+            }
+            ffmpeg.avfilter_graph_segment_apply_opts(segment, 0).Check(error);
+            ffmpeg.avfilter_graph_segment_init(segment, 0).Check(error);
+            // Links the chain's filters to each other and returns the pads left open: the chain's input and output.
+            ffmpeg.avfilter_graph_segment_link(segment, 0, &inputs, &outputs).Check(error);
+            if (inputs is null || inputs->next is not null || outputs is null || outputs->next is not null)
+                throw new MediaException($"{error}: needs exactly one input and one output");
+            ffmpeg.avfilter_link(_source, 0, inputs->filter_ctx, (uint)inputs->pad_idx).Check(error);
+            ffmpeg.avfilter_link(outputs->filter_ctx, (uint)outputs->pad_idx, _sink, 0).Check(error);
         }
         finally
         {
             ffmpeg.avfilter_inout_free(&inputs);
             ffmpeg.avfilter_inout_free(&outputs);
-        }
-        if (hwDevice is not null)
-        {
-            for (var i = 0; i < (int)_graph->nb_filters; i++)
-                _graph->filters[i]->hw_device_ctx = ffmpeg.av_buffer_ref(hwDevice);
+            ffmpeg.avfilter_graph_segment_free(&segment);
         }
         ffmpeg.avfilter_graph_config(_graph, null).Check($"{what}: filter \"{chain}\"");
     }
