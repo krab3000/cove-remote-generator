@@ -75,7 +75,7 @@ internal sealed class WorkerSession : IWorkerSession, IAsyncDisposable
 
     public async Task<WorkerInfo> HelloAsync(string coveBaseUrl, CancellationToken ct)
     {
-        var info = await CallAsync<WorkerInfo>(RpcMethods.Hello, new HelloParams(ProtocolInfo.Version, coveBaseUrl), ct);
+        var info = await CallAsync<WorkerInfo>(RpcMethods.Hello, new HelloParams(coveBaseUrl), ct);
         _info = info;
         return info;
     }

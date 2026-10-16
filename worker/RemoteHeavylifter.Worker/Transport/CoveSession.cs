@@ -17,7 +17,7 @@ public sealed class WorkerFacts(WorkerOptions options, TaskRunner runner)
 
     public string? FfmpegVersion { get; set; }
 
-    public WorkerInfo Info() => new(ProtocolInfo.Version, Version, options.Name, FfmpegVersion, options.Encoder, runner.Capacity, runner.Running);
+    public WorkerInfo Info() => new(Version, options.Name, FfmpegVersion, runner.Slots.Info());
 }
 
 /// <summary>
@@ -68,8 +68,6 @@ public sealed class CoveSession(TaskRunner runner, WorkerFacts facts, ILogger<Co
         [JsonRpcMethod(RpcMethods.Hello)]
         public WorkerInfo Hello(HelloParams hello)
         {
-            if (hello.ProtocolVersion != ProtocolInfo.Version)
-                logger.LogWarning("Cove speaks protocol {Theirs}, this worker {Ours}; update the older side", hello.ProtocolVersion, ProtocolInfo.Version);
             logger.LogInformation("Cove says hello; files are exchanged through {CoveUrl}", hello.CoveBaseUrl);
             return facts.Info();
         }
@@ -81,7 +79,9 @@ public sealed class CoveSession(TaskRunner runner, WorkerFacts facts, ILogger<Co
         public bool Submit(TaskRequest request)
         {
             if (!runner.TryStart(request, this, session))
-                throw new LocalRpcException($"the worker is busy ({runner.Running}/{runner.Capacity})") { ErrorCode = RpcErrorCodes.Busy };
+                throw new LocalRpcException(runner.Slots.Find(request.SlotId) is { } slot
+                    ? $"slot {slot.Id} is busy ({slot.Running}/{slot.Plan.Capacity})"
+                    : $"the worker has no slot {request.SlotId}") { ErrorCode = RpcErrorCodes.Busy };
             return true;
         }
 

@@ -24,7 +24,6 @@ export interface WorkerView {
   url: string | null;
   coveUrlOverride: string | null;
   enabled: boolean;
-  maxConcurrency: number;
   connection: WorkerConnection;
   sourceAccess: SourceAccess;
   pathMappings: PathMapping[];
@@ -38,7 +37,6 @@ export interface WorkerInput {
   url: string | null;
   coveUrlOverride: string | null;
   enabled: boolean;
-  maxConcurrency: number;
   sourceAccess: SourceAccess;
   pathMappings: PathMapping[];
 }
@@ -52,7 +50,26 @@ export interface PendingWorker {
   lastSeen: string;
 }
 
-export type WorkerState = "live" | "offline" | "unauthorized" | "incompatible" | "disabled" | "waiting";
+export type WorkerState = "live" | "offline" | "unauthorized" | "disabled" | "waiting";
+
+/** A codec a GPU decodes (libav name), up to a size. */
+export interface DecoderCap {
+  codec: string;
+  maxWidth: number;
+  maxHeight: number;
+}
+
+/** A worker's slot pool: one GPU (or the CPU) running up to `capacity` videos at once. */
+export interface SlotInfo {
+  id: string;
+  kind: "gpu" | "cpu";
+  vendor: string | null;
+  name: string;
+  capacity: number;
+  running: number;
+  encoder: string;
+  decoders: DecoderCap[];
+}
 
 export interface WorkerHealth {
   id: string;
@@ -63,9 +80,7 @@ export interface WorkerHealth {
   connection: WorkerConnection;
   workerVersion: string | null;
   ffmpegVersion: string | null;
-  encoder: string | null;
-  capacity: number | null;
-  running: number | null;
+  slots: SlotInfo[] | null;
   remoteAddress: string | null;
   connectedSince: string | null;
   error: string | null;
@@ -80,6 +95,8 @@ export interface WorkerTestResult {
 export interface WorkerSettings {
   coveUrlForWorkers: string | null;
   coveAuthEnabled: boolean;
+  /** Idle CPU slots take cover, sprite and phash of GPU-decodable videos while every GPU slot is busy. */
+  cpuHelpsGpu: boolean;
 }
 
 export interface GenerateOptions {
@@ -148,7 +165,7 @@ export const api = {
   testWorker: (id: string) => request<WorkerTestResult>(`${BASE}/workers/${id}/test`, { method: "POST" }),
   health: (refresh = false) => request<WorkerHealth[]>(`${BASE}/workers/health?refresh=${refresh}`),
   settings: () => request<WorkerSettings>(`${BASE}/settings`),
-  saveSettings: (settings: Pick<WorkerSettings, "coveUrlForWorkers">) =>
+  saveSettings: (settings: Pick<WorkerSettings, "coveUrlForWorkers" | "cpuHelpsGpu">) =>
     request<WorkerSettings>(`${BASE}/settings`, { method: "PUT", body: JSON.stringify({ ...settings, coveAuthEnabled: false }) }),
   options: () => request<GenerateOptions>(`${BASE}/generate/options`),
   generate: (options: GenerateOptions) =>

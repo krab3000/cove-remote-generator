@@ -1,6 +1,6 @@
 # Remote Heavylifter worker: .NET runtime + BtbN's FFmpeg n9.0 GPL shared build in /opt/ffmpeg. The worker runs
-# libav in-process from /opt/ffmpeg/lib (its FFmpeg.AutoGen 9.0 bindings need exactly these library versions) and
-# keeps /opt/ffmpeg/bin/ffmpeg for HL_MEDIA_ENGINE=cli.
+# libav in-process from /opt/ffmpeg/lib (its FFmpeg.AutoGen 9.0 bindings need exactly these library versions); the
+# ffmpeg executable stays only to check the libraries at build time.
 # Build from the repository root: docker build -f worker/Dockerfile .
 FROM --platform=$BUILDPLATFORM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
@@ -22,7 +22,7 @@ RUN set -eux; \
     curl -fL --retry 5 --retry-all-errors --retry-delay 5 -o /tmp/ffmpeg.tar.xz \
         "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/${FFMPEG_ASSET}"; \
     mkdir -p /opt/ffmpeg; \
-    tar -Jx --strip-components=1 -C /opt/ffmpeg -f /tmp/ffmpeg.tar.xz --wildcards '*/bin/ffmpeg' '*/bin/ffprobe' '*/lib/*.so*'; \
+    tar -Jx --strip-components=1 -C /opt/ffmpeg -f /tmp/ffmpeg.tar.xz --wildcards '*/bin/ffmpeg' '*/lib/*.so*'; \
     rm -f /tmp/ffmpeg.tar.xz; \
     apt-get purge -y xz-utils; apt-get autoremove -y; rm -rf /var/lib/apt/lists/*; \
     LD_LIBRARY_PATH=/opt/ffmpeg/lib /opt/ffmpeg/bin/ffmpeg -hide_banner -version | head -n1
@@ -34,9 +34,7 @@ RUN mkdir -p /var/lib/heavylifter && chown "$APP_UID" /var/lib/heavylifter
 # The worker token is generated into HL_DATA_DIR on first start; keep the volume to keep the worker's identity.
 ENV HL_DATA_DIR=/var/lib/heavylifter \
     LD_LIBRARY_PATH=/opt/ffmpeg/lib \
-    HL_FFMPEG_LIBS=/opt/ffmpeg/lib \
-    HL_FFMPEG=/opt/ffmpeg/bin/ffmpeg \
-    HL_FFPROBE=/opt/ffmpeg/bin/ffprobe
+    HL_FFMPEG_LIBS=/opt/ffmpeg/lib
 
 USER $APP_UID
 VOLUME ["/var/lib/heavylifter"]

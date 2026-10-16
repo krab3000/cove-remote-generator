@@ -238,16 +238,6 @@ public sealed class WorkerHub : IWorkerDirectory
                 hello.CancelAfter(HandshakeTimeout);
                 info = await session.HelloAsync(ResolveCoveBaseUrl(worker, settings, inboundBaseUrl) ?? "", hello.Token);
             }
-            if (info.ProtocolVersion != ProtocolInfo.Version)
-            {
-                var message = $"protocol {info.ProtocolVersion}, Cove expects {ProtocolInfo.Version}";
-                if (state is not null)
-                    Fail(state, WorkerStates.Incompatible, message);
-                _logger.LogWarning("Remote worker {Worker} is incompatible: {Message}", worker.Name, message);
-                await session.CloseAsync(CloseReasons.Incompatible);
-                return;
-            }
-
             if (state is not null)
             {
                 lock (state)
@@ -257,8 +247,8 @@ public sealed class WorkerHub : IWorkerDirectory
                     state.Error = null;
                 }
             }
-            _logger.LogInformation("Remote worker {Worker} connected ({Direction}, {Capacity} slots, {Encoder})",
-                worker.Name, worker.Connection, info.Capacity, info.Encoder);
+            _logger.LogInformation("Remote worker {Worker} connected ({Direction}, slots {Slots})",
+                worker.Name, worker.Connection, DescribeSlots(info.Slots));
 
             await session.Completion.WaitAsync(ct);
             if (state is not null)
@@ -324,12 +314,16 @@ public sealed class WorkerHub : IWorkerDirectory
         return workers.Select(worker => Health(worker, now)).ToList();
     }
 
+    /// <summary>"nvidia0 ×2 (h264_nvenc), cpu ×1 (libx264)".</summary>
+    public static string DescribeSlots(IReadOnlyList<SlotInfo> slots) =>
+        slots.Count == 0 ? "none" : string.Join(", ", slots.Select(s => $"{s.Id} ×{s.Capacity} ({s.Encoder})"));
+
     private WorkerHealthView Health(WorkerDefinition worker, DateTimeOffset now)
     {
         if (_sessions.TryGetValue(worker.Id, out var session) && session.IsOpen && TryInfo(session) is { } info)
         {
             return new WorkerHealthView(worker.Id, worker.Name, worker.Enabled, WorkerStates.Live, true, worker.Connection,
-                info.WorkerVersion, info.FfmpegVersion, info.Encoder, info.Capacity, info.Running,
+                info.WorkerVersion, info.FfmpegVersion, info.Slots,
                 session.RemoteAddress, session.ConnectedSince, null, now);
         }
 
@@ -352,7 +346,7 @@ public sealed class WorkerHub : IWorkerDirectory
         }
 
         return new WorkerHealthView(worker.Id, worker.Name, worker.Enabled, state, false, worker.Connection,
-            null, null, null, null, null, null, null, error, now);
+            null, null, null, null, null, error, now);
     }
 
     private static WorkerInfo? TryInfo(WorkerSession session)

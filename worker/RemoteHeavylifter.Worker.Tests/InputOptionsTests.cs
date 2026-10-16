@@ -41,7 +41,7 @@ public class InputOptionsTests
     [Fact]
     public void Cover()
     {
-        var args = CoverGenerator.BuildCoverArgs(["-hwaccel", "auto"], Source, 12.5, "v360=input=e", "/o.jpg");
+        var args = CommandLine.BuildCoverArgs(["-hwaccel", "auto"], Source, 12.5, "v360=input=e", "/o.jpg");
         Assert.Equal(1, AssertOptionsBeforeEveryInput(args));
         // Global input args still lead; the seek stays ahead of the per-input options.
         Assert.Equal(["-hwaccel", "auto"], args[..2]);
@@ -53,7 +53,7 @@ public class InputOptionsTests
     public void Spliced()
     {
         var plan = Timing.PlanPreview(30, 12, 0.75, "0", "0", false)!;
-        var args = PreviewGenerator.SplicedArgs(["-hwaccel", "auto"], "libx264", Source, plan, Specs.Preview(), "/o/p.mp4");
+        var args = CommandLine.SplicedArgs(["-hwaccel", "auto"], "libx264", Source, plan, Specs.Preview(), "/o/p.mp4");
         Assert.Equal(12, AssertOptionsBeforeEveryInput(args));
         Assert.Equal(["-hwaccel", "auto", "-v", "error", "-y", "-ss", "1.25", "-t", "0.75", .. Options, "-i", Url], args[..(11 + Options.Length)]);
     }
@@ -62,7 +62,7 @@ public class InputOptionsTests
     public void Single()
     {
         var plan = Timing.PlanPreview(5, 12, 0.75, "1", "1", false)!;
-        var args = PreviewGenerator.SingleArgs([], "h264_vaapi", Source, 5, plan, Specs.Preview(), "/o/p.mp4");
+        var args = CommandLine.SingleArgs([], "h264_vaapi", Source, 5, plan, Specs.Preview(), "/o/p.mp4");
         Assert.Equal(1, AssertOptionsBeforeEveryInput(args));
         Assert.Equal(
             ["-v", "error", "-y", "-vaapi_device", "/dev/dri/renderD128", "-ss", "1.00", .. Options, "-i", Url, "-t", "3.00"],
@@ -73,7 +73,7 @@ public class InputOptionsTests
     public void Chunk()
     {
         var plan = Timing.PlanPreview(10, 12, 0.75, "0", "0", true)!;
-        var args = PreviewGenerator.ChunkArgs([], "libx264", Source, 2.5, plan, Specs.Preview(audio: true), "/o/c.mp4");
+        var args = CommandLine.ChunkArgs([], "libx264", Source, 2.5, plan, Specs.Preview(audio: true), "/o/c.mp4");
         Assert.Equal(1, AssertOptionsBeforeEveryInput(args));
         Assert.Equal(["-v", "error", "-y", "-ss", "2.50", .. Options, "-i", Url, "-t", "0.75"], args[..(9 + Options.Length)]);
         Assert.DoesNotContain("-an", args);
@@ -83,7 +83,7 @@ public class InputOptionsTests
     public void SpriteBatch()
     {
         var timestamps = Enumerable.Range(0, 24).Select(i => i * 2.0 + 1).ToArray();
-        var args = SpriteGenerator.SpriteBatchArgs(Source, "/tmp/f", timestamps, 0, 24, 160, null);
+        var args = CommandLine.SpriteBatchArgs(Source, "/tmp/f", timestamps, 0, 24, 160, null);
         Assert.Equal(24, AssertOptionsBeforeEveryInput(args));
         Assert.Equal(["-v", "error", "-y", "-threads", "1", "-ss", "1.000", .. Options, "-i", Url], args[..(9 + Options.Length)]);
     }
@@ -99,20 +99,20 @@ public class InputOptionsTests
     public void ConcatIsNotASourceInput()
     {
         Assert.Equal(["-v", "error", "-y", "-f", "concat", "-safe", "0", "-i", "/w/list.txt", "-c:v", "copy", "/o.mp4"],
-            PreviewGenerator.ConcatArgs("/w/list.txt", "/o.mp4"));
+            CommandLine.ConcatArgs("/w/list.txt", "/o.mp4"));
     }
 
     [Fact]
     public void BatchBudgetCountsInputOptions()
     {
-        var plain = SpriteGenerator.PerFrameArgLength(Specs.Local(Url), "/tmp/f", 81, 160, null);
-        var withOptions = SpriteGenerator.PerFrameArgLength(Source, "/tmp/f", 81, 160, null);
+        var plain = CommandLine.PerFrameArgLength(Specs.Local(Url), "/tmp/f", 81, 160, null);
+        var withOptions = CommandLine.PerFrameArgLength(Source, "/tmp/f", 81, 160, null);
         Assert.Equal(plain + Options.Sum(o => o.Length + 1), withOptions);
         Assert.Equal(Url.Length + 28 + SpriteGenerator.FramePath("/tmp/f", 80).Length + 72 + 22, plain);
 
         // Long enough options shrink the batches below 24 frames.
         var bulky = new MediaSource(Url, [.. Options, "-user_agent", new string('x', 1500)], 0);
-        var length = SpriteGenerator.PerFrameArgLength(bulky, "/tmp/f", 81, 160, null);
+        var length = CommandLine.PerFrameArgLength(bulky, "/tmp/f", 81, 160, null);
         var batches = Timing.PlanBatches(length, 81);
         Assert.All(batches, b => Assert.True(b.Count == 24000 / length || b.Start + b.Count == 81));
         Assert.True(batches[0].Count < 24);
@@ -135,7 +135,7 @@ public class InputOptionsTests
         Assert.True(hw.HardwareDecode);
 
         var timestamps = Enumerable.Range(0, 6).Select(i => i * 2.0 + 1).ToArray();
-        var args = SpriteGenerator.SpriteBatchArgs(hw, "/tmp/f", timestamps, 0, 6, 160, null);
+        var args = CommandLine.SpriteBatchArgs(hw, "/tmp/f", timestamps, 0, 6, 160, null);
         var inputs = 0;
         for (var i = 0; i < args.Count; i++)
         {
@@ -152,44 +152,67 @@ public class InputOptionsTests
         Assert.Equal(Source, hw.Software);
         Assert.Equal(["-hwaccel", "d3d11va"], Source.WithHardwareDecode("d3d11va", null).DecodeOptions);
 
-        var plain = SpriteGenerator.PerFrameArgLength(Source, "/tmp/f", 81, 160, null);
-        Assert.Equal(plain + decode.Sum(o => o.Length + 1), SpriteGenerator.PerFrameArgLength(hw, "/tmp/f", 81, 160, null));
+        var plain = CommandLine.PerFrameArgLength(Source, "/tmp/f", 81, 160, null);
+        Assert.Equal(plain + decode.Sum(o => o.Length + 1), CommandLine.PerFrameArgLength(hw, "/tmp/f", 81, 160, null));
     }
 
     [Fact]
-    public void HwAccelSettings()
+    public void Slot_settings()
     {
-        var env = new Dictionary<string, string> { ["HL_COVE_URL"] = "http://cove", ["HL_HWACCEL"] = "cuda", ["HL_HWACCEL_DEVICES"] = " 0, 1 " };
+        var env = new Dictionary<string, string> { ["HL_COVE_URL"] = "http://cove", ["HL_HV_INTEL_SLOTS"] = " 0,2; 1, 3 " };
         var options = WorkerOptions.FromEnvironment(env.GetValueOrDefault);
-        Assert.Equal("cuda", options.HwAccel);
-        Assert.Equal(["0", "1"], options.HwAccelDevices);
+        Assert.Equal([(0, 2), (1, 3)], options.IntelSlots!);
+        Assert.Null(options.NvidiaSlots);
+        Assert.Equal(1, options.CpuSlots);
         Assert.False(options.SpriteKeyframes);
         Assert.Empty(options.Validate());
+
+        // Repeated flags add up; a flag replaces the variable.
+        options = WorkerOptions.Load(["--hv-nvidia-slots", "0,2", "--hv-nvidia-slots=1,0", "--hv-intel-slots=0,1", "--cpu-slots=0"],
+            env.GetValueOrDefault).Options;
+        Assert.Equal([(0, 2), (1, 0)], options.NvidiaSlots!);
+        Assert.Equal([(0, 1)], options.IntelSlots!);
+        Assert.Equal(0, options.CpuSlots);
+
+        foreach (var bad in new[] { "0", "a,2", "0,-1", "0,2;0,3" })
+        {
+            env["HL_HV_INTEL_SLOTS"] = bad;
+            Assert.Contains(WorkerOptions.FromEnvironment(env.GetValueOrDefault).Validate(), e => e.Contains("HL_HV_INTEL_SLOTS"));
+        }
+        env.Remove("HL_HV_INTEL_SLOTS");
+        env["HL_CPU_SLOTS"] = "-1";
+        Assert.Contains(WorkerOptions.FromEnvironment(env.GetValueOrDefault).Validate(), e => e.Contains("HL_CPU_SLOTS"));
+        env.Remove("HL_CPU_SLOTS");
 
         env["HL_SPRITE_SEEK"] = "Keyframe";
         Assert.True(WorkerOptions.FromEnvironment(env.GetValueOrDefault).SpriteKeyframes);
         env["HL_SPRITE_SEEK"] = "fast";
         Assert.Contains(WorkerOptions.FromEnvironment(env.GetValueOrDefault).Validate(), e => e.Contains("HL_SPRITE_SEEK"));
-        env.Remove("HL_SPRITE_SEEK");
+    }
 
-        env["HL_HWACCEL"] = "none";
-        options = WorkerOptions.FromEnvironment(env.GetValueOrDefault);
-        Assert.Null(options.HwAccel);
-        Assert.Contains(options.Validate(), e => e.Contains("HL_HWACCEL_DEVICES"));
+    [Fact]
+    public void Bench_needs_no_cove()
+    {
+        var options = WorkerOptions.Load(["--bench-counts", "1,2", "--bench-clips=1080p,4K"], _ => null).Options;
+        Assert.Contains(options.Validate(), e => e.Contains("HL_COVE_URL"));
+        Assert.Empty(options.Validate(bench: true));
+        Assert.Equal([1, 2], options.BenchCounts);
+        Assert.Equal(["1080p", "4k"], options.BenchClips);
+        Assert.Contains(WorkerOptions.Load(["--bench-counts=0"], _ => null).Options.Validate(bench: true), e => e.Contains("HL_BENCH_COUNTS"));
     }
 
     [Fact]
     public void Flags_override_the_environment()
     {
-        var env = new Dictionary<string, string> { ["HL_COVE_URL"] = "http://env", ["HL_MAX_CONCURRENCY"] = "3", ["HL_HWACCEL"] = "cuda" };
+        var env = new Dictionary<string, string> { ["HL_COVE_URL"] = "http://env", ["HL_CPU_SLOTS"] = "3", ["HL_HWACCEL_SKIP_CODECS"] = "vc1" };
         var (options, errors, help) = WorkerOptions.Load(
-            ["--cove-url", "http://flag/", "--max-concurrency=5", "--hwaccel=", "--sprite-seek", "keyframe"], env.GetValueOrDefault);
+            ["--cove-url", "http://flag/", "--cpu-slots=5", "--hwaccel-skip-codecs=", "--sprite-seek", "keyframe"], env.GetValueOrDefault);
 
         Assert.Empty(errors);
         Assert.False(help);
         Assert.Equal("http://flag", options.CoveUrl);
-        Assert.Equal(5, options.MaxConcurrency);
-        Assert.Null(options.HwAccel); // an empty flag clears the variable
+        Assert.Equal(5, options.CpuSlots);
+        Assert.Empty(options.HwSkipCodecs); // an empty flag clears the variable
         Assert.True(options.SpriteKeyframes);
 
         Assert.Equal("http://env", WorkerOptions.Load([], env.GetValueOrDefault).Options.CoveUrl);

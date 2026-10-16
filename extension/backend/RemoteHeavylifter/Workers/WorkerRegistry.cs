@@ -7,7 +7,6 @@ namespace RemoteHeavylifter.Workers;
 public sealed class WorkerRegistry(StoreHolder store)
 {
     internal const string StoreKey = "workers";
-    public const int MaxConcurrencyLimit = 64;
 
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
     private readonly SemaphoreSlim _gate = new(1, 1);
@@ -158,8 +157,6 @@ public sealed class WorkerRegistry(StoreHolder store)
         if (coveUrl is not null && !IsHttpUrl(coveUrl))
             errors.Add($"{label}: the Cove URL override must be an absolute http:// or https:// address.");
 
-        if (item.MaxConcurrency < 1 || item.MaxConcurrency > MaxConcurrencyLimit)
-            errors.Add($"{label}: max parallel videos must be between 1 and {MaxConcurrencyLimit}.");
 
         var access = string.IsNullOrWhiteSpace(item.SourceAccess) ? SourceAccess.Http : item.SourceAccess.Trim().ToLowerInvariant();
         if (access is not (SourceAccess.Http or SourceAccess.File))
@@ -188,7 +185,6 @@ public sealed class WorkerRegistry(StoreHolder store)
             Url = url,
             CoveUrlOverride = coveUrl,
             Enabled = item.Enabled,
-            MaxConcurrency = item.MaxConcurrency,
             SourceAccess = access,
             PathMappings = mappings,
         };

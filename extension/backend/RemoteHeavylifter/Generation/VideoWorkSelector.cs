@@ -88,6 +88,7 @@ public sealed class VideoWorkSelector(DbContext db)
                     file.Width,
                     file.Height,
                     file.Size,
+                    file.VideoCodec,
                     file.SourceUnreadableAt,
                     file.SourceUnreadableReason,
                     file.SourceUnreadableSize,
@@ -156,6 +157,9 @@ public sealed class VideoWorkSelector(DbContext db)
                     SourcePath = sourcePath,
                     FileId = file.Id,
                     SourceSize = file.Size,
+                    Codec = CodecNames.Normalize(file.VideoCodec),
+                    Width = file.Width,
+                    Height = file.Height,
                 });
             }
         }

@@ -26,11 +26,11 @@ public sealed class CliMediaEngine(MediaContext ctx, ILogger? logger = null) : I
     {
         var timeout = Timing.FrameDecodeTimeout(source.Size);
         var result = await ProcessRunner.RunAsync(
-            [ctx.Ffmpeg, .. CoverGenerator.BuildCoverArgs(ctx.InputArgs, source, seek, spec.Filter, output)], timeout, ct);
+            [ctx.Ffmpeg, .. CommandLine.BuildCoverArgs(ctx.InputArgs, source, seek, spec.Filter, output)], timeout, ct);
         // A build without v360, or a layout the filter rejects, still gets the full frame.
         if (!result.Ok && !string.IsNullOrEmpty(spec.Filter) && spec.FallbackWithoutFilter)
             result = await ProcessRunner.RunAsync(
-                [ctx.Ffmpeg, .. CoverGenerator.BuildCoverArgs(ctx.InputArgs, source, seek, null, output)], timeout, ct);
+                [ctx.Ffmpeg, .. CommandLine.BuildCoverArgs(ctx.InputArgs, source, seek, null, output)], timeout, ct);
         if (!result.Ok)
             throw new MediaException($"cover: {result.Summary()}");
     }
@@ -69,7 +69,7 @@ public sealed class CliMediaEngine(MediaContext ctx, ILogger? logger = null) : I
         MediaSource source, IReadOnlyList<double> timestamps, int scaleWidth, string? preFilter, string frameDir, bool keyframes, CancellationToken ct)
     {
         Directory.CreateDirectory(frameDir);
-        var length = SpriteGenerator.PerFrameArgLength(source, frameDir, timestamps.Count, scaleWidth, preFilter);
+        var length = CommandLine.PerFrameArgLength(source, frameDir, timestamps.Count, scaleWidth, preFilter);
         var frames = new string?[timestamps.Count];
         // Every input of a batch opens its own decoder, which on a GPU holds video memory: keep hardware batches small.
         var batchSize = source.HardwareDecode ? Timing.HardwareSpriteBatchSize : Timing.SpriteBatchSize;
@@ -77,13 +77,13 @@ public sealed class CliMediaEngine(MediaContext ctx, ILogger? logger = null) : I
         {
             var timeout = TimeSpan.FromSeconds(60 + 6 * count);
             var result = await ProcessRunner.RunAsync(
-                [ctx.Ffmpeg, .. SpriteGenerator.SpriteBatchArgs(source, frameDir, timestamps, start, count, scaleWidth, preFilter, keyframes)], timeout, ct);
+                [ctx.Ffmpeg, .. CommandLine.SpriteBatchArgs(source, frameDir, timestamps, start, count, scaleWidth, preFilter, keyframes)], timeout, ct);
             if (!result.Ok && source.HardwareDecode)
             {
                 _log.LogDebug("frame batch {First}-{Last} with hardware decoding: {Summary}; retrying in software",
                     start, start + count - 1, result.Summary(200));
                 result = await ProcessRunner.RunAsync(
-                    [ctx.Ffmpeg, .. SpriteGenerator.SpriteBatchArgs(source.Software, frameDir, timestamps, start, count, scaleWidth, preFilter, keyframes)],
+                    [ctx.Ffmpeg, .. CommandLine.SpriteBatchArgs(source.Software, frameDir, timestamps, start, count, scaleWidth, preFilter, keyframes)],
                     timeout, ct);
             }
             if (!result.Ok)
@@ -107,10 +107,10 @@ public sealed class CliMediaEngine(MediaContext ctx, ILogger? logger = null) : I
         switch (plan.Mode)
         {
             case PreviewMode.Single:
-                await EncodeAsync(enc => PreviewGenerator.SingleArgs(ctx.InputArgs, enc, source, duration, plan, spec, output), output, EncodeTimeout, ct);
+                await EncodeAsync(enc => CommandLine.SingleArgs(ctx.InputArgs, enc, source, duration, plan, spec, output), output, EncodeTimeout, ct);
                 break;
             case PreviewMode.Spliced:
-                await EncodeAsync(enc => PreviewGenerator.SplicedArgs(ctx.InputArgs, enc, source, plan, spec, output), output, EncodeTimeout, ct);
+                await EncodeAsync(enc => CommandLine.SplicedArgs(ctx.InputArgs, enc, source, plan, spec, output), output, EncodeTimeout, ct);
                 break;
             default:
                 await ChunkedAsync(source, plan, spec, workDir, output, ct);
@@ -149,7 +149,7 @@ public sealed class CliMediaEngine(MediaContext ctx, ILogger? logger = null) : I
                 chunks.Add(chunk);
                 try
                 {
-                    await EncodeAsync(enc => PreviewGenerator.ChunkArgs(ctx.InputArgs, enc, src, seek, plan, spec, chunk), chunk, ChunkTimeout, ct);
+                    await EncodeAsync(enc => CommandLine.ChunkArgs(ctx.InputArgs, enc, src, seek, plan, spec, chunk), chunk, ChunkTimeout, ct);
                 }
                 catch (MediaException ex)
                 {
@@ -163,7 +163,7 @@ public sealed class CliMediaEngine(MediaContext ctx, ILogger? logger = null) : I
             var listPath = Path.Combine(chunkDir, "concat.txt");
             await File.WriteAllTextAsync(listPath, string.Join("\n", valid.Select(c =>
                 "file '" + Path.GetFullPath(c).Replace('\\', '/').Replace("'", "'\\''") + "'")), ct);
-            var result = await ProcessRunner.RunAsync([ctx.Ffmpeg, .. PreviewGenerator.ConcatArgs(listPath, output)], ConcatTimeout, ct);
+            var result = await ProcessRunner.RunAsync([ctx.Ffmpeg, .. CommandLine.ConcatArgs(listPath, output)], ConcatTimeout, ct);
             if (!result.Ok)
                 throw new MediaException($"preview concat: {result.Summary()}");
         }

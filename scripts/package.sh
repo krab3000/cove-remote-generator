@@ -23,6 +23,6 @@ if ls "$publish" | grep -Eq '^(Cove\.|Microsoft\.EntityFrameworkCore|Npgsql|Pgve
 fi
 
 rm -f "$zip"
-(cd "$publish" && zip -qr "$zip" .)
+if command -v zip >/dev/null 2>&1; then (cd "$publish" && zip -qr "$zip" .); else (cd "$publish" && python3 -c "import os,sys,zipfile; z=zipfile.ZipFile(sys.argv[1],'w',zipfile.ZIP_DEFLATED); [z.write(os.path.join(r,f),os.path.relpath(os.path.join(r,f),'.')) for r,_,fs in os.walk('.') for f in fs]; z.close()" "$zip"); fi
 echo "Built $zip"
 (cd "$publish" && find . -type f | sed 's|^\./|  |')

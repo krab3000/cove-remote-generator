@@ -15,7 +15,7 @@ namespace RemoteHeavylifter.Api;
 public sealed record WorkerTestResult(bool Ok, string Message);
 
 /// <summary>Settings as the UI sees them, plus whether Cove's auth is on (workers on public addresses need it).</summary>
-public sealed record WorkerSettingsView(string? CoveUrlForWorkers, bool CoveAuthEnabled);
+public sealed record WorkerSettingsView(string? CoveUrlForWorkers, bool CoveAuthEnabled, bool CpuHelpsGpu = false);
 
 public sealed record ErrorBody(string Code, string Message, IReadOnlyList<string>? Errors = null);
 
@@ -73,15 +73,16 @@ internal static class RemoteEndpoints
             .RequireCovePermission(Permissions.ExtensionsConfigure);
 
         api.MapGet("/settings", async (WorkerSettingsStore settings, CoveConfiguration config, CancellationToken ct) =>
-                Results.Ok(new WorkerSettingsView((await settings.GetAsync(ct)).CoveUrlForWorkers, config.Auth.Enabled)))
+                Results.Ok(View(await settings.GetAsync(ct), config)))
             .RequireCovePermission(Permissions.ExtensionsConfigure);
 
         api.MapPut("/settings", async (WorkerSettingsView input, WorkerSettingsStore settings, CoveConfiguration config, CancellationToken ct) =>
             {
-                var errors = await settings.SaveAsync(new WorkerSettings { CoveUrlForWorkers = input.CoveUrlForWorkers }, ct);
+                var errors = await settings.SaveAsync(
+                    new WorkerSettings { CoveUrlForWorkers = input.CoveUrlForWorkers, CpuHelpsGpu = input.CpuHelpsGpu }, ct);
                 if (errors.Count > 0)
                     return Results.BadRequest(new ErrorBody("INVALID_SETTINGS", errors[0], errors));
-                return Results.Ok(new WorkerSettingsView((await settings.GetAsync(ct)).CoveUrlForWorkers, config.Auth.Enabled));
+                return Results.Ok(View(await settings.GetAsync(ct), config));
             })
             .RequireCovePermission(Permissions.ExtensionsConfigure);
 
@@ -99,6 +100,9 @@ internal static class RemoteEndpoints
     /// Checks the whole path a real task takes: the worker is connected, then it reads a real video from Cove over
     /// HTTP with its token (ffprobe on the source URL), which also proves the Cove URL it was given is reachable.
     /// </summary>
+    private static WorkerSettingsView View(WorkerSettings settings, CoveConfiguration config) =>
+        new(settings.CoveUrlForWorkers, config.Auth.Enabled, settings.CpuHelpsGpu);
+
     private static async Task<IResult> TestWorkerAsync(
         Guid id,
         WorkerRegistry registry,
@@ -129,7 +133,7 @@ internal static class RemoteEndpoints
             await using (var scope = scopes.CreateAsyncScope())
                 sample = await scope.ServiceProvider.GetRequiredService<VideoWorkSelector>().SampleSourceAsync(worker.DirectMappings, timeout.Token);
             if (sample is not { } source)
-                return Results.Ok(new WorkerTestResult(true, $"Connected ({info.Encoder}, {info.Capacity} slots). No video available to test reading with."));
+                return Results.Ok(new WorkerTestResult(true, $"Connected (slots {WorkerHub.DescribeSlots(info.Slots)}). No video available to test reading with."));
 
             var taskId = $"test-{Guid.NewGuid():N}";
             access.Register(new TaskAssignment(taskId, worker.Id, source.Path, [], Path.GetTempPath()));
@@ -138,7 +142,7 @@ internal static class RemoteEndpoints
                 var url = $"{baseUrl}/api/ext/{RemoteHeavylifterExtension.ExtensionId}/worker/tasks/{taskId}/source";
                 var workerPath = worker.DirectMappings is { } mappings ? PathMapper.Map(source.CovePath, mappings) : null;
                 var probe = await session.ProbeAsync(new ProbeParams(taskId, url, workerPath), timeout.Token);
-                var connected = $"Connected ({info.Encoder}, {info.Capacity} slots)";
+                var connected = $"Connected (slots {WorkerHub.DescribeSlots(info.Slots)})";
                 if (probe.SourceAccess == SourceAccess.File)
                     return Results.Ok(probe.Ok
                         ? new WorkerTestResult(true, $"{connected} and read {workerPath} directly.")

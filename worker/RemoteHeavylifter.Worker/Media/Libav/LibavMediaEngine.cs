@@ -11,28 +11,28 @@ namespace RemoteHeavylifter.Worker.Media.Libav;
 /// <param name="DecodeThreads">Decoder threads; null picks per operation (see <see cref="LibavMediaEngine"/>).</param>
 /// <param name="Concurrency">Videos the worker generates at once, which share the CPU.</param>
 /// <param name="FormatOptions">HL_FFMPEG_INPUT_ARGS as demuxer/protocol options.</param>
+/// <param name="Encoder">The preview encoder, with its device as <see cref="EncoderArgs.WithDevice"/> writes it.</param>
 /// <param name="HwSkipCodecs">Codecs (libav names: vc1, hevc …) decoded in software even when the source asks for the GPU.</param>
+/// <param name="HwCodecs">The only codecs decoded on the GPU (the slot's GPU's decoders); null allows any.</param>
 public sealed record LibavEngineOptions(
     int? DecodeThreads, int Concurrency, string Encoder, IReadOnlyList<KeyValuePair<string, string>> FormatOptions,
-    IReadOnlyList<string>? HwSkipCodecs = null);
+    IReadOnlyList<string>? HwSkipCodecs = null, IReadOnlyCollection<string>? HwCodecs = null);
 
 /// <summary>
 /// libav in this process: each step opens its source once and keeps one decoder (on the GPU when asked), seeks only when
 /// decoding on would cost more, and hands frames over in memory. Seeks, filters and the cover's JPEG settings mirror
-/// the command line's, so outputs match <see cref="CliMediaEngine"/>'s closely (not bit for bit).
+/// the ffmpeg command line Cove runs, so outputs match Cove's closely (not bit for bit).
 /// </summary>
 public sealed class LibavMediaEngine : IMediaEngine
 {
     private readonly LibavInfo _info;
     private readonly LibavEngineOptions _options;
-    private readonly IMediaEngine _fallback;
     private readonly ILogger _log;
 
-    public LibavMediaEngine(LibavInfo info, LibavEngineOptions options, IMediaEngine fallback, ILogger? logger = null)
+    public LibavMediaEngine(LibavInfo info, LibavEngineOptions options, ILogger? logger = null)
     {
         _info = info;
         _options = options;
-        _fallback = fallback;
         _log = logger ?? NullLogger.Instance;
     }
 
@@ -108,7 +108,7 @@ public sealed class LibavMediaEngine : IMediaEngine
         const string what = "cover";
         using var interrupt = new Interrupt(ct, Timing.FrameDecodeTimeout(source.Size), what);
         var settings = new DecodeSettings(FrameThreads, SliceThreads: false, Lenient: true, _options.FormatOptions,
-            HwSkipCodecs: _options.HwSkipCodecs);
+            HwSkipCodecs: _options.HwSkipCodecs, HwCodecs: _options.HwCodecs);
         var input = Open(source, settings, interrupt, what);
         try
         {
@@ -173,7 +173,7 @@ public sealed class LibavMediaEngine : IMediaEngine
         using var interrupt = new Interrupt(ct, TimeSpan.FromSeconds(60 + 6 * timestamps.Count), what);
         // Fast seek decodes one frame per seek: slice threads, as frame threads would delay each by a frame per thread.
         var settings = new DecodeSettings(FrameThreads, SliceThreads: keyframes, FormatOptions: _options.FormatOptions, KeyframesOnly: keyframes,
-            HwSkipCodecs: _options.HwSkipCodecs);
+            HwSkipCodecs: _options.HwSkipCodecs, HwCodecs: _options.HwCodecs);
         var images = new Image<Rgb24>?[timestamps.Count];
         var input = Open(source, settings, interrupt, what);
         try
@@ -252,7 +252,7 @@ public sealed class LibavMediaEngine : IMediaEngine
         using var interrupt = new Interrupt(ct, timeout, "preview");
         // One decoder for the whole preview: libav picks the threads, frame threading included.
         var settings = new DecodeSettings(_options.DecodeThreads ?? 0, SliceThreads: false, FormatOptions: _options.FormatOptions,
-            HwSkipCodecs: _options.HwSkipCodecs);
+            HwSkipCodecs: _options.HwSkipCodecs, HwCodecs: _options.HwCodecs);
         var encoder = _options.Encoder;
         try
         {

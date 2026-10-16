@@ -55,6 +55,9 @@ public static class LibavLoader
     /// <summary>Whether the loaded libraries know the hwaccel (cuda, d3d11va, vaapi …). Call after a successful load.</summary>
     public static bool SupportsHwAccel(string name) => ffmpeg.av_hwdevice_find_type_by_name(name) != AVHWDeviceType.AV_HWDEVICE_TYPE_NONE;
 
+    /// <summary>Whether the loaded libraries have the decoder (h264_qsv …). Call after a successful load.</summary>
+    public static unsafe bool HasDecoder(string name) => ffmpeg.avcodec_find_decoder_by_name(name) is not null;
+
     /// <summary>Whether the loaded libraries have the encoder (h264_nvenc, libx264 …). Call after a successful load.</summary>
     public static unsafe bool HasEncoder(string name) => ffmpeg.avcodec_find_encoder_by_name(name) is not null;
 

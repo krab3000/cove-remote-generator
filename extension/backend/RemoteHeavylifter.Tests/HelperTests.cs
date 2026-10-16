@@ -197,7 +197,7 @@ public sealed class WorkerRegistryTests
     public void A_missing_token_keeps_the_stored_one_and_views_mask_it()
     {
         var (workers, errors) = WorkerRegistry.Merge(
-            [new WorkerInput(Dialed.Id, "gpu-box", null, "ws://gpu:8750/rpc/", null, true, 4)],
+            [new WorkerInput(Dialed.Id, "gpu-box", null, "ws://gpu:8750/rpc/", null, true)],
             [Dialed]);
         Assert.Empty(errors);
         Assert.Equal(Token, workers[0].Token);
@@ -232,7 +232,7 @@ public sealed class WorkerRegistryTests
     {
         var (_, errors) = WorkerRegistry.Merge(
         [
-            new WorkerInput(null, "", null, "http://x", "ftp://cove", true, 0),
+            new WorkerInput(null, "", null, "http://x", "ftp://cove", true),
             new WorkerInput(null, "a", "short", null, null),
             new WorkerInput(null, "b", Token, null, null),
             new WorkerInput(null, "B", Token + "x", null, null),
@@ -242,7 +242,6 @@ public sealed class WorkerRegistryTests
         Assert.Contains(errors, e => e.Contains("token is required"));
         Assert.Contains(errors, e => e.Contains("ws:// or wss://"));
         Assert.Contains(errors, e => e.Contains("Cove URL override"));
-        Assert.Contains(errors, e => e.Contains("max parallel"));
         Assert.Contains(errors, e => e.Contains("at least 16 characters"));
         Assert.Contains(errors, e => e.Contains("more than one worker"));
         Assert.Contains(errors, e => e.Contains("already uses this token"));
@@ -252,7 +251,7 @@ public sealed class WorkerRegistryTests
     public void Direct_source_access_keeps_trimmed_mappings_and_needs_one()
     {
         var (workers, errors) = WorkerRegistry.Merge(
-            [new WorkerInput(null, "a", Token, null, null, true, 2, "FILE", [new(" /media/ ", "/mnt/media/"), new("", " ")])], []);
+            [new WorkerInput(null, "a", Token, null, null, true, "FILE", [new(" /media/ ", "/mnt/media/"), new("", " ")])], []);
         Assert.Empty(errors);
         Assert.Equal(SourceAccess.File, workers[0].SourceAccess);
         Assert.Equal([new PathMapping("/media", "/mnt/media")], workers[0].PathMappings);
@@ -261,10 +260,10 @@ public sealed class WorkerRegistryTests
 
         (_, errors) = WorkerRegistry.Merge(
         [
-            new WorkerInput(null, "a", Token, null, null, true, 2, SourceAccess.File),
-            new WorkerInput(null, "b", Token + "b", null, null, true, 2, "ftp"),
-            new WorkerInput(null, "c", Token + "c", null, null, true, 2, SourceAccess.File, [new("/media", "")]),
-            new WorkerInput(null, "d", Token + "d", null, null, true, 2, SourceAccess.File, [new("/m", "/x"), new("/m/", "/y")]),
+            new WorkerInput(null, "a", Token, null, null, true, SourceAccess.File),
+            new WorkerInput(null, "b", Token + "b", null, null, true, "ftp"),
+            new WorkerInput(null, "c", Token + "c", null, null, true, SourceAccess.File, [new("/media", "")]),
+            new WorkerInput(null, "d", Token + "d", null, null, true, SourceAccess.File, [new("/m", "/x"), new("/m/", "/y")]),
         ], []);
         Assert.Contains(errors, e => e.StartsWith("a:") && e.Contains("at least one path mapping"));
         Assert.Contains(errors, e => e.StartsWith("b:") && e.Contains("source access"));

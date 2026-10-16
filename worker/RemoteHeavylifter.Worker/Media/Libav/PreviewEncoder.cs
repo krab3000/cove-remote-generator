@@ -43,16 +43,29 @@ internal static unsafe class PreviewEncoder
         using var audio = spec.Audio && plan.Mode != PreviewMode.Spliced ? AudioTrack.Open(source.Software, interrupt, log) : null;
         using var writer = new PreviewWriter(output, interrupt);
         AVBufferRef* uploadDevice = null;
+        AVBufferRef* qsvSession = null;
         var filtered = ffmpeg.av_frame_alloc();
         try
         {
-            if (encoder.EndsWith("_vaapi", StringComparison.Ordinal))
+            if (EncoderArgs.Split(encoder) is var (encoderName, encoderDevice) && encoderName.EndsWith("_vaapi", StringComparison.Ordinal))
             {
                 AVBufferRef* device = null;
-                var ret = ffmpeg.av_hwdevice_ctx_create(&device, AVHWDeviceType.AV_HWDEVICE_TYPE_VAAPI, "/dev/dri/renderD128", null, 0);
+                var ret = ffmpeg.av_hwdevice_ctx_create(&device, AVHWDeviceType.AV_HWDEVICE_TYPE_VAAPI,
+                    encoderDevice ?? EncoderArgs.DefaultVaapiDevice, null, 0);
                 if (ret < 0)
                     throw new EncodeException($"preview: vaapi device: {Av.Error(ret)}");
                 uploadDevice = device;
+            }
+            else if (EncoderArgs.Split(encoder) is (var qsvName, { } qsvDevice) && qsvName.EndsWith("_qsv", StringComparison.Ordinal))
+            {
+                // Quick Sync on the slot's GPU: a session on its render node, given to the encoder (frames stay in memory).
+                AVBufferRef* device = null;
+                var options = Av.Dictionary([new("child_device", qsvDevice)]);
+                var ret = ffmpeg.av_hwdevice_ctx_create(&device, AVHWDeviceType.AV_HWDEVICE_TYPE_QSV, null, options, 0);
+                Av.Free(options);
+                if (ret < 0)
+                    throw new EncodeException($"preview: qsv device {qsvDevice}: {Av.Error(ret)}");
+                qsvSession = device;
             }
             if (audio is not null)
                 writer.AddAudio(audio);
@@ -112,7 +125,7 @@ internal static unsafe class PreviewEncoder
                 while (graph.Pull(filtered, What))
                 {
                     if (!writer.VideoOpen)
-                        writer.OpenVideo(codec, setup, filtered, clock!.Rate, graph.OutputHwFrames);
+                        writer.OpenVideo(codec, setup, filtered, clock!.Rate, graph.OutputHwFrames, qsvSession);
                     var seconds = filtered->pts == ffmpeg.AV_NOPTS_VALUE ? 0 : Av.Seconds(filtered->pts, graph.OutputTimeBase);
                     var slot = clock!.Next;
                     for (var copies = clock.Place(seconds); copies > 0; copies--)
@@ -127,6 +140,8 @@ internal static unsafe class PreviewEncoder
             ffmpeg.av_frame_free(&frameToFree);
             var deviceToFree = uploadDevice;
             ffmpeg.av_buffer_unref(&deviceToFree);
+            var qsvSessionToFree = qsvSession;
+            ffmpeg.av_buffer_unref(&qsvSessionToFree);
         }
     }
 
@@ -135,7 +150,7 @@ internal static unsafe class PreviewEncoder
     private static string Upload(AVCodec* codec, EncoderSetup setup, string encoder)
     {
         var chain = EncoderArgs.UploadChain(encoder).TrimStart(',');
-        if (encoder.EndsWith("_vaapi", StringComparison.Ordinal))
+        if (EncoderArgs.Split(encoder).Name.EndsWith("_vaapi", StringComparison.Ordinal))
             return chain;
         var wanted = setup.PixelFormat ?? chain["format=".Length..];
         var supported = Supported<AVPixelFormat>(codec, AVCodecConfig.AV_CODEC_CONFIG_PIX_FORMAT)
@@ -221,7 +236,8 @@ internal sealed unsafe class PreviewWriter : IDisposable
     }
 
     /// <summary>Opens the video encoder for frames like <paramref name="first"/> at <paramref name="rate"/>, then the file.</summary>
-    public void OpenVideo(AVCodec* codec, EncoderSetup setup, AVFrame* first, AVRational rate, AVBufferRef* hwFrames)
+    /// <param name="hwDevice">The GPU an encoder fed from memory runs on (Quick Sync); null: its default.</param>
+    public void OpenVideo(AVCodec* codec, EncoderSetup setup, AVFrame* first, AVRational rate, AVBufferRef* hwFrames, AVBufferRef* hwDevice = null)
     {
         _video = ffmpeg.avcodec_alloc_context3(codec);
         _video->width = first->width;
@@ -236,6 +252,8 @@ internal sealed unsafe class PreviewWriter : IDisposable
         _video->time_base = ffmpeg.av_inv_q(rate);
         if (hwFrames is not null)
             _video->hw_frames_ctx = ffmpeg.av_buffer_ref(hwFrames);
+        else if (hwDevice is not null)
+            _video->hw_device_ctx = ffmpeg.av_buffer_ref(hwDevice);
         if (setup.QScale is { } q)
         {
             _video->flags |= ffmpeg.AV_CODEC_FLAG_QSCALE;

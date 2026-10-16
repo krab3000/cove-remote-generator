@@ -24,7 +24,6 @@ public sealed record WorkerDefinition
     public string? Url { get; init; }
     public string? CoveUrlOverride { get; init; }
     public bool Enabled { get; init; } = true;
-    public int MaxConcurrency { get; init; } = 2;
 
     /// <summary>How the worker reads source videos: <see cref="SourceAccess.Http"/> (from Cove) or
     /// <see cref="SourceAccess.File"/> (from its own filesystem through <see cref="PathMappings"/>, else from Cove).</summary>
@@ -57,7 +56,6 @@ public sealed record WorkerView(
     string? Url,
     string? CoveUrlOverride,
     bool Enabled,
-    int MaxConcurrency,
     string Connection,
     string SourceAccess,
     IReadOnlyList<PathMapping> PathMappings)
@@ -71,7 +69,6 @@ public sealed record WorkerView(
         worker.Url,
         worker.CoveUrlOverride,
         worker.Enabled,
-        worker.MaxConcurrency,
         worker.Connection,
         worker.SourceAccess,
         worker.PathMappings);
@@ -85,7 +82,6 @@ public sealed record WorkerInput(
     string? Url,
     string? CoveUrlOverride,
     bool Enabled = true,
-    int MaxConcurrency = 2,
     string? SourceAccess = null,
     IReadOnlyList<PathMapping>? PathMappings = null);
 
@@ -119,7 +115,6 @@ public static class WorkerStates
     public const string Live = "live";
     public const string Offline = "offline";
     public const string Unauthorized = "unauthorized";
-    public const string Incompatible = "incompatible";
     public const string Disabled = "disabled";
     public const string Waiting = "waiting";
 }
@@ -134,9 +129,7 @@ public sealed record WorkerHealthView(
     string Connection,
     string? WorkerVersion,
     string? FfmpegVersion,
-    string? Encoder,
-    int? Capacity,
-    int? Running,
+    IReadOnlyList<SlotInfo>? Slots,
     string? RemoteAddress,
     DateTimeOffset? ConnectedSince,
     string? Error,
@@ -147,4 +140,7 @@ public sealed record WorkerSettings
 {
     /// <summary>Base URL workers use to reach Cove's HTTP endpoints, e.g. http://192.168.1.10:5073.</summary>
     public string? CoveUrlForWorkers { get; init; }
+
+    /// <summary>Idle CPU slots take cover, sprite and phash of videos a GPU could decode while every GPU slot is busy.</summary>
+    public bool CpuHelpsGpu { get; init; }
 }

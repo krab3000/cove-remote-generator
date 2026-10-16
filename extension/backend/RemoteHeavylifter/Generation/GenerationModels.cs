@@ -66,9 +66,16 @@ public sealed class WorkItem
     public int FileId { get; init; }
     public long SourceSize { get; init; }
 
-    public int Attempts { get; set; }
+    /// <summary>The video codec as libav names it (<see cref="CodecNames.Normalize"/>); null when unknown.</summary>
+    public string? Codec { get; init; }
+    public int Width { get; init; }
+    public int Height { get; init; }
+
     public IJobUnit? Unit { get; set; }
-    public List<string> Notes { get; } = [];
+
+    /// <summary>Parts of this video still to finish, and what went wrong in the finished ones.</summary>
+    internal int PendingParts;
+    internal readonly List<string> Errors = [];
 
     public double CoverSeek => Duration * 0.2 is var seek && seek > 0 ? seek : 1;
 }

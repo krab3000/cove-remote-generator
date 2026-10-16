@@ -1,5 +1,4 @@
 using System.Globalization;
-using System.Threading.Channels;
 using Cove.Core.Interfaces;
 using Microsoft.Extensions.Logging;
 using RemoteHeavylifter.Protocol;
@@ -22,12 +21,14 @@ public sealed record CoordinatorTimings(
         FailuresBeforeDead: 3);
 }
 
-/// <summary>A worker taking part in a run: how many videos it may work on at once, and how it reaches Cove.</summary>
+/// <summary>A worker taking part in a run: its slot pools, and how it reaches Cove.</summary>
 /// <param name="DirectMappings">The worker's path mappings when it reads sources from its own filesystem; null when it
 /// reads them over HTTP.</param>
-public sealed record LiveWorker(Guid WorkerId, string Name, int Slots, string CoveBaseUrl, IReadOnlyList<PathMapping>? DirectMappings = null);
+public sealed record LiveWorker(
+    Guid WorkerId, string Name, IReadOnlyList<SlotInfo> Slots, string CoveBaseUrl, IReadOnlyList<PathMapping>? DirectMappings = null);
 
-public sealed record RunContext(string RunId, GeneratedPaths Paths, PreviewSettings Preview, bool Overwrite);
+/// <param name="CpuHelpsGpu">Idle CPU slots take videos a GPU could decode while every GPU slot is busy.</param>
+public sealed record RunContext(string RunId, GeneratedPaths Paths, PreviewSettings Preview, bool Overwrite, bool CpuHelpsGpu = false);
 
 /// <summary>Unit totals across a run, including videos settled before any remote work.</summary>
 public sealed class RunCounters
@@ -40,12 +41,27 @@ public sealed class RunCounters
     public int Done => Volatile.Read(ref Succeeded) + Volatile.Read(ref Failed) + Volatile.Read(ref Skipped);
 }
 
+/// <summary>What one task of a video does.</summary>
+internal enum PartKind
+{
+    /// <summary>Everything the video needs, on a GPU that decodes it.</summary>
+    All,
+
+    /// <summary>Only the preview: GPU work even when no GPU decodes the video, for the hardware encoder.</summary>
+    Preview,
+
+    /// <summary>Cover, sprite and phash: decoding work, on a CPU slot when no GPU decodes the video.</summary>
+    Rest,
+}
+
 /// <summary>
-/// Spreads one run's videos over the live workers. Each worker gets as many loops as it has slots; a loop
-/// submits one video over the worker's session and waits for it to finish — the worker reads the source and
-/// uploads the artifacts through the extension's HTTP endpoints — then commits what was uploaded. A worker
-/// that keeps failing or disconnects is marked dead: its loops stop and whatever it held goes back on the
-/// queue for the others, and a reviver brings it back when its session reconnects.
+/// Spreads one run's videos over the slots of all live workers as one pool. A video a GPU decodes is one task for a GPU
+/// slot that decodes it; one no GPU decodes is a preview task for a GPU slot (decoded in software, encoded on the GPU)
+/// and a task for the rest on a CPU slot. Each slot runs as many loops as its capacity; a free loop takes the oldest
+/// task it may run, so no work is assigned ahead and every slot stays busy while there is work it can do. The worker
+/// reads the source and uploads the artifacts through the extension's HTTP endpoints; the loop commits what arrived.
+/// A worker that keeps failing or disconnects is marked dead: its loops stop, its tasks go back to the others, and a
+/// reviver brings it back when its session reconnects.
 /// </summary>
 internal sealed class RunExecutor(
     IWorkerDirectory workers,
@@ -56,7 +72,7 @@ internal sealed class RunExecutor(
     TimeProvider time,
     ILogger logger)
 {
-    private sealed class Slot(LiveWorker live)
+    private sealed class WorkerState(LiveWorker live)
     {
         public LiveWorker Live { get; } = live;
         public string Name => Live.Name;
@@ -64,21 +80,49 @@ internal sealed class RunExecutor(
         public DateTimeOffset DeadSince;
         public string? LastError;
         public int ConsecutiveFailures;
-        public int ActiveWorkers;
-        public int Succeeded;
-        public int Failed;
+        public List<SlotState> Slots { get; } = [];
+        public int ActiveLoops => Slots.Sum(s => Volatile.Read(ref s.ActiveLoops));
     }
 
-    private readonly Channel<WorkItem> _queue = Channel.CreateUnbounded<WorkItem>();
+    private sealed class SlotState(WorkerState worker, SlotInfo info)
+    {
+        public WorkerState Worker { get; } = worker;
+        public SlotInfo Info { get; } = info;
+        public bool Gpu => Info.Kind == SlotKinds.Gpu;
+        public string Name => $"{Info.Id}@{Worker.Name}";
+        public int ActiveLoops;
+        public int Busy;
+        public int Succeeded;
+    }
+
+    private sealed class Part(WorkItem item, PartKind kind)
+    {
+        public WorkItem Item { get; } = item;
+        public PartKind Kind { get; set; } = kind;
+        public int Attempts;
+
+        public bool Cover => Kind != PartKind.Preview && Item.Cover;
+        public bool Preview => Kind != PartKind.Rest && Item.Preview;
+        public bool Sprite => Kind != PartKind.Preview && Item.Sprite;
+        public bool Phash => Kind != PartKind.Preview && Item.Phash;
+        public string Tag => Kind.ToString().ToLowerInvariant();
+    }
+
+    private readonly object _gate = new();
+    private readonly LinkedList<Part> _pending = [];
+    private TaskCompletionSource _changed = NewSignal();
     private readonly TaskCompletionSource _allDone = new(TaskCreationOptions.RunContinuationsAsynchronously);
-    private readonly List<Task> _workers = [];
-    private List<Slot> _slots = [];
+    private readonly List<Task> _loops = [];
+    private List<WorkerState> _workers = [];
     private RunContext _run = null!;
     private IJobProgress _progress = null!;
     private RunCounters _counters = null!;
     private CancellationToken _token;
     private int _remaining;
 
+    private static TaskCompletionSource NewSignal() => new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    /// <returns>Parts finished per slot (<c>slot@worker</c>).</returns>
     public async Task<IReadOnlyDictionary<string, int>> ExecuteAsync(
         IReadOnlyList<LiveWorker> live,
         IReadOnlyList<WorkItem> items,
@@ -94,14 +138,18 @@ internal sealed class RunExecutor(
         if (items.Count == 0)
             return new Dictionary<string, int>();
 
+        _workers = live.Select(w => new WorkerState(w)).ToList();
+        foreach (var worker in _workers)
+            worker.Slots.AddRange(worker.Live.Slots.Where(s => s.Capacity > 0).Select(s => new SlotState(worker, s)));
+        var slots = _workers.SelectMany(w => w.Slots).ToList();
         foreach (var item in items)
-            _queue.Writer.TryWrite(item);
+            foreach (var part in Split(item, slots))
+                _pending.AddLast(part);
 
         using var runCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         _token = runCts.Token;
-        _slots = live.Select(w => new Slot(w)).ToList();
-        foreach (var slot in _slots)
-            StartWorkers(slot);
+        foreach (var worker in _workers)
+            StartLoops(worker);
         var reviver = Task.Run(ReviveLoopAsync, CancellationToken.None);
 
         try
@@ -111,37 +159,165 @@ internal sealed class RunExecutor(
         finally
         {
             await runCts.CancelAsync();
+            Signal();
             Task[] all;
-            lock (_workers)
-                all = [.. _workers, reviver];
+            lock (_loops)
+                all = [.. _loops, reviver];
             await Task.WhenAll(all).ContinueWith(static _ => { }, TaskScheduler.Default);
         }
 
-        return _slots.ToDictionary(s => s.Name, s => s.Succeeded);
+        return _workers.SelectMany(w => w.Slots).ToDictionary(s => s.Name, s => s.Succeeded);
     }
 
-    // ---- workers ----------------------------------------------------------------------------
+    // ---- routing ----------------------------------------------------------------------------
 
-    private void StartWorkers(Slot slot)
+    /// <summary>A video's tasks: one for a GPU that decodes it, else a preview for a GPU and the rest for a CPU (one task
+    /// when the pool lacks GPU or CPU slots altogether).</summary>
+    private static List<Part> Split(WorkItem item, IReadOnlyList<SlotState> slots)
     {
-        var missing = slot.Live.Slots - Volatile.Read(ref slot.ActiveWorkers);
-        for (var i = 0; i < missing; i++)
+        var anyGpu = slots.Any(s => s.Gpu);
+        var anyCpu = slots.Any(s => !s.Gpu);
+        var decodable = slots.Any(s => s.Gpu && s.Info.Decodes(item.Codec, item.Width, item.Height));
+        List<Part> parts;
+        if (decodable || !anyGpu || !anyCpu)
+            parts = [new Part(item, PartKind.All)];
+        else
         {
-            Interlocked.Increment(ref slot.ActiveWorkers);
-            lock (_workers)
-                _workers.Add(Task.Run(() => WorkerAsync(slot), CancellationToken.None));
+            parts = [];
+            if (item.Preview)
+                parts.Add(new Part(item, PartKind.Preview));
+            if (item.Cover || item.Sprite || item.Phash)
+                parts.Add(new Part(item, PartKind.Rest));
+        }
+        item.PendingParts = parts.Count;
+        return parts;
+    }
+
+    /// <summary>The oldest pending part <paramref name="slot"/> may run, taken off the queue; null when none. Under _gate.</summary>
+    private Part? TakeFor(SlotState slot)
+    {
+        var live = _workers.Where(w => !w.Dead).SelectMany(w => w.Slots).ToList();
+        var liveGpu = live.Where(s => s.Gpu).ToList();
+        var liveCpu = live.Any(s => !s.Gpu);
+
+        bool Eligible(Part part)
+        {
+            var item = part.Item;
+            if (slot.Gpu)
+                return part.Kind switch
+                {
+                    // The GPU that decodes it first; when none of those is live, any GPU (decoding in software).
+                    PartKind.All => slot.Info.Decodes(item.Codec, item.Width, item.Height)
+                                    || !liveGpu.Any(s => s.Info.Decodes(item.Codec, item.Width, item.Height)),
+                    PartKind.Preview => true,
+                    _ => !liveCpu,
+                };
+            return part.Kind == PartKind.Rest || liveGpu.Count == 0;
+        }
+
+        for (var node = _pending.First; node is not null; node = node.Next)
+        {
+            if (!Eligible(node.Value))
+                continue;
+            _pending.Remove(node);
+            return node.Value;
+        }
+
+        // A CPU slot with nothing of its own helps with GPU work when allowed and the GPUs are backed up: it takes the
+        // cover, sprite and phash of a waiting video and leaves its preview to a GPU.
+        if (!slot.Gpu && _run.CpuHelpsGpu)
+        {
+            var freeGpu = liveGpu.Sum(s => Math.Max(0, s.Info.Capacity - Volatile.Read(ref s.Busy)));
+            var waiting = _pending.Count(p => p.Kind == PartKind.All);
+            for (var node = _pending.First; node is not null && waiting > freeGpu; node = node.Next)
+            {
+                var part = node.Value;
+                if (part.Kind != PartKind.All || !(part.Item.Cover || part.Item.Sprite || part.Item.Phash))
+                    continue;
+                _pending.Remove(node);
+                if (part.Item.Preview)
+                {
+                    Interlocked.Increment(ref part.Item.PendingParts);
+                    _pending.AddFirst(new Part(part.Item, PartKind.Preview));
+                }
+                part.Kind = PartKind.Rest;
+                return part;
+            }
+        }
+        return null;
+    }
+
+    /// <summary>The next part for <paramref name="slot"/>, waiting for one; null when the run is over or the worker died.</summary>
+    private async Task<Part?> NextAsync(SlotState slot)
+    {
+        while (true)
+        {
+            Task changed;
+            lock (_gate)
+            {
+                if (_allDone.Task.IsCompleted || slot.Worker.Dead || _token.IsCancellationRequested)
+                    return null;
+                if (TakeFor(slot) is { } part)
+                {
+                    Interlocked.Increment(ref slot.Busy);
+                    return part;
+                }
+                changed = _changed.Task;
+            }
+            await changed.WaitAsync(_token);
         }
     }
 
-    private async Task WorkerAsync(Slot slot)
+    /// <summary>Wakes every waiting loop to look at the queue again.</summary>
+    private void Signal()
+    {
+        TaskCompletionSource old;
+        lock (_gate)
+        {
+            old = _changed;
+            _changed = NewSignal();
+        }
+        old.TrySetResult();
+    }
+
+    private void Enqueue(Part part)
+    {
+        lock (_gate)
+            _pending.AddLast(part);
+        Signal();
+    }
+
+    // ---- loops ------------------------------------------------------------------------------
+
+    private void StartLoops(WorkerState worker)
+    {
+        foreach (var slot in worker.Slots)
+        {
+            var missing = slot.Info.Capacity - Volatile.Read(ref slot.ActiveLoops);
+            for (var i = 0; i < missing; i++)
+            {
+                Interlocked.Increment(ref slot.ActiveLoops);
+                lock (_loops)
+                    _loops.Add(Task.Run(() => LoopAsync(slot), CancellationToken.None));
+            }
+        }
+    }
+
+    private async Task LoopAsync(SlotState slot)
     {
         try
         {
-            while (!slot.Dead && await _queue.Reader.WaitToReadAsync(_token))
+            while (await NextAsync(slot) is { } part)
             {
-                if (slot.Dead || !_queue.Reader.TryRead(out var item))
-                    continue;
-                await ProcessAsync(slot, item);
+                try
+                {
+                    await ProcessAsync(slot, part);
+                }
+                finally
+                {
+                    Interlocked.Decrement(ref slot.Busy);
+                    Signal(); // a free GPU slot changes what a helping CPU slot may take
+                }
             }
         }
         catch (OperationCanceledException) when (_token.IsCancellationRequested)
@@ -149,29 +325,31 @@ internal sealed class RunExecutor(
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "Remote generation loop for {Worker} stopped unexpectedly", slot.Name);
+            logger.LogError(ex, "Remote generation loop for {Slot} stopped unexpectedly", slot.Name);
         }
         finally
         {
-            Interlocked.Decrement(ref slot.ActiveWorkers);
+            Interlocked.Decrement(ref slot.ActiveLoops);
         }
     }
 
-    private async Task ProcessAsync(Slot slot, WorkItem item)
+    private async Task ProcessAsync(SlotState slot, Part part)
     {
-        if (workers.GetSession(slot.Live.WorkerId) is not { } session)
+        var worker = slot.Worker;
+        var item = part.Item;
+        if (workers.GetSession(worker.Live.WorkerId) is not { } session)
         {
-            // The connection dropped between runs of this loop; hand the item to someone else.
-            MarkDead(slot, "disconnected");
-            _queue.Writer.TryWrite(item);
+            // The connection dropped between runs of this loop; hand the part to someone else.
+            MarkDead(worker, "disconnected");
+            Enqueue(part);
             return;
         }
 
         item.Unit ??= _progress.StartUnit(item.VideoId.ToString(CultureInfo.InvariantCulture), item.Label);
-        item.Attempts++;
-        var taskId = $"{_run.RunId}-{item.VideoId}-a{item.Attempts}";
-        var uploadDir = Path.Combine(_run.Paths.TempRoot, _run.RunId, item.VideoId.ToString(CultureInfo.InvariantCulture), $"a{item.Attempts}");
-        var assignment = new TaskAssignment(taskId, slot.Live.WorkerId, item.SourcePath, RequestedKinds(item), uploadDir);
+        var attempt = Interlocked.Increment(ref part.Attempts);
+        var taskId = $"{_run.RunId}-{item.VideoId}-{part.Tag}-a{attempt}";
+        var uploadDir = Path.Combine(_run.Paths.TempRoot, _run.RunId, item.VideoId.ToString(CultureInfo.InvariantCulture), $"{part.Tag}-a{attempt}");
+        var assignment = new TaskAssignment(taskId, worker.Live.WorkerId, item.SourcePath, RequestedKinds(part), uploadDir);
         access.Register(assignment);
         item.Unit.Report(0, $"{slot.Name}: submitting");
 
@@ -181,24 +359,24 @@ internal sealed class RunExecutor(
         try
         {
             var result = await session.RunTaskAsync(
-                BuildRequest(item, taskId, slot.Live),
+                BuildRequest(part, taskId, worker.Live, slot.Info.Id),
                 p => item.Unit?.Report(p.Progress, $"{slot.Name}: {p.Stage ?? "working"}"),
                 timeout.Token);
 
             // A worker that cannot reach Cove is a problem with that worker, not the video: count it against
             // the worker (so it is taken out after a few) and let another one try.
             if (result.ErrorCode == ErrorCodes.SourceUnreachable)
-                throw new WorkerException($"{slot.Name} could not read the source from Cove: {result.Error}", transient: true, result.ErrorCode);
-            Interlocked.Exchange(ref slot.ConsecutiveFailures, 0);
+                throw new WorkerException($"{worker.Name} could not read the source from Cove: {result.Error}", transient: true, result.ErrorCode);
+            Interlocked.Exchange(ref worker.ConsecutiveFailures, 0);
 
             if (result.Status is TaskStates.Failed or TaskStates.Cancelled)
             {
-                Finish(item, slot, JobUnitOutcome.Failed, $"{slot.Name}: {result.Error ?? "generation failed"}");
+                PartDone(part, slot, JobUnitOutcome.Failed, $"{slot.Name}: {result.Error ?? "generation failed"}");
                 return;
             }
 
-            var errors = await CollectAsync(item, assignment, result);
-            Finish(item, slot,
+            var errors = await CollectAsync(part, assignment, result);
+            PartDone(part, slot,
                 errors.Count == 0 ? JobUnitOutcome.Succeeded : JobUnitOutcome.Failed,
                 errors.Count == 0 ? null : $"{slot.Name}: {string.Join("; ", errors)}");
         }
@@ -208,16 +386,16 @@ internal sealed class RunExecutor(
         }
         catch (OperationCanceledException)
         {
-            OnTransientFailure(slot, item, new WorkerException(
+            OnTransientFailure(slot, part, new WorkerException(
                 $"{slot.Name}: did not finish within {runningTimeout.TotalMinutes:0} minutes", transient: true));
         }
         catch (WorkerException ex) when (ex.Transient)
         {
-            OnTransientFailure(slot, item, ex);
+            OnTransientFailure(slot, part, ex);
         }
         catch (Exception ex)
         {
-            Finish(item, slot, JobUnitOutcome.Failed, $"{slot.Name}: {ex.Message}");
+            PartDone(part, slot, JobUnitOutcome.Failed, $"{slot.Name}: {ex.Message}");
         }
         finally
         {
@@ -226,17 +404,21 @@ internal sealed class RunExecutor(
         }
     }
 
-    internal static IReadOnlyList<string> RequestedKinds(WorkItem item)
+    private static IReadOnlyList<string> RequestedKinds(Part part)
     {
         var kinds = new List<string>();
-        if (item.Cover) kinds.Add(ArtifactKinds.Cover);
-        if (item.Preview) kinds.Add(ArtifactKinds.Preview);
-        if (item.Sprite) kinds.AddRange([ArtifactKinds.Sprite, ArtifactKinds.Vtt]);
+        if (part.Cover) kinds.Add(ArtifactKinds.Cover);
+        if (part.Preview) kinds.Add(ArtifactKinds.Preview);
+        if (part.Sprite) kinds.AddRange([ArtifactKinds.Sprite, ArtifactKinds.Vtt]);
         return kinds;
     }
 
-    private TaskRequest BuildRequest(WorkItem item, string taskId, LiveWorker live)
+    /// <summary>Every uploaded kind a whole video asks for.</summary>
+    internal static IReadOnlyList<string> RequestedKinds(WorkItem item) => RequestedKinds(new Part(item, PartKind.All));
+
+    private TaskRequest BuildRequest(Part part, string taskId, LiveWorker live, string slotId)
     {
+        var item = part.Item;
         var preview = _run.Preview;
         var taskUrl = $"{live.CoveBaseUrl.TrimEnd('/')}/api/ext/{extensionId}/worker/tasks/{Uri.EscapeDataString(taskId)}";
         return new TaskRequest(
@@ -245,25 +427,26 @@ internal sealed class RunExecutor(
             $"{taskUrl}/source",
             item.SourceSize,
             item.Duration,
-            RequestedKinds(item).ToDictionary(kind => kind, kind => $"{taskUrl}/artifacts/{kind}"),
-            item.Cover ? new CoverSpec(item.CoverSeek, item.CoverFilter) : null,
-            item.Preview
+            RequestedKinds(part).ToDictionary(kind => kind, kind => $"{taskUrl}/artifacts/{kind}"),
+            part.Cover ? new CoverSpec(item.CoverSeek, item.CoverFilter) : null,
+            part.Preview
                 ? new PreviewSpec(preview.Segments, preview.SegmentDuration, preview.ExcludeStart, preview.ExcludeEnd,
                     preview.Preset, preview.Audio, PreviewSettings.Crf, PreviewSettings.Width, item.PreviewScale)
                 : null,
-            item.Sprite ? new SpriteSpec(SpriteSettings.MaxFrames, item.SpriteWidth, item.SpriteFilter, GeneratedPaths.SpriteFileName(item.VideoId)) : null,
-            item.Phash ? new PhashSpec() : null,
-            live.DirectMappings is { } mappings ? PathMapper.Map(item.CovePath, mappings) : null);
+            part.Sprite ? new SpriteSpec(SpriteSettings.MaxFrames, item.SpriteWidth, item.SpriteFilter, GeneratedPaths.SpriteFileName(item.VideoId)) : null,
+            part.Phash ? new PhashSpec() : null,
+            live.DirectMappings is { } mappings ? PathMapper.Map(item.CovePath, mappings) : null,
+            slotId);
     }
 
-    /// <summary>Commit every requested artifact the worker produced and uploaded. Returns what is missing.</summary>
-    private async Task<List<string>> CollectAsync(WorkItem item, TaskAssignment assignment, TaskResult result)
+    /// <summary>Commit every artifact the part asked for that the worker produced and uploaded. Returns what is missing.</summary>
+    private async Task<List<string>> CollectAsync(Part part, TaskAssignment assignment, TaskResult result)
     {
         var errors = new List<string>();
         var paths = _run.Paths;
-        var id = item.VideoId;
+        var id = part.Item.VideoId;
 
-        if (item.Cover)
+        if (part.Cover)
         {
             if (Uploaded(assignment, result, ArtifactKinds.Cover, out var file, out var error))
                 ArtifactCommitter.CommitSingle(file, paths.Cover(id), _run.Overwrite);
@@ -271,7 +454,7 @@ internal sealed class RunExecutor(
                 errors.Add(error);
         }
 
-        if (item.Preview)
+        if (part.Preview)
         {
             if (Uploaded(assignment, result, ArtifactKinds.Preview, out var file, out var error))
                 ArtifactCommitter.CommitSingle(file, paths.Preview(id), _run.Overwrite);
@@ -279,7 +462,7 @@ internal sealed class RunExecutor(
                 errors.Add(error);
         }
 
-        if (item.Sprite)
+        if (part.Sprite)
         {
             if (!Uploaded(assignment, result, ArtifactKinds.Sprite, out var sprite, out var error)
                 || !Uploaded(assignment, result, ArtifactKinds.Vtt, out var vtt, out error))
@@ -288,10 +471,10 @@ internal sealed class RunExecutor(
                 ArtifactCommitter.CommitSpritePair(sprite, vtt, paths.Sprite(id), paths.SpriteVtt(id), _run.Overwrite);
         }
 
-        if (item.Phash)
+        if (part.Phash)
         {
             if (result.Artifacts.TryGetValue(ArtifactKinds.Phash, out var phash) && phash is { Succeeded: true, Value: { Length: > 0 } value })
-                await fingerprints.SavePhashAsync(item.FileId, value, _token);
+                await fingerprints.SavePhashAsync(part.Item.FileId, value, _token);
             else
                 errors.Add($"phash failed{(phash?.Error is { Length: > 0 } reason ? $" ({reason})" : "")}");
         }
@@ -331,41 +514,61 @@ internal sealed class RunExecutor(
 
     // ---- outcomes ---------------------------------------------------------------------------
 
-    private void OnTransientFailure(Slot slot, WorkItem item, WorkerException ex)
+    private void OnTransientFailure(SlotState slot, Part part, WorkerException ex)
     {
-        var failures = Interlocked.Increment(ref slot.ConsecutiveFailures);
-        logger.LogWarning("Remote generation of video {VideoId} on {Worker} failed (attempt {Attempt}): {Error}",
-            item.VideoId, slot.Name, item.Attempts, ex.Message);
+        var worker = slot.Worker;
+        var failures = Interlocked.Increment(ref worker.ConsecutiveFailures);
+        logger.LogWarning("Remote generation of video {VideoId} ({Part}) on {Slot} failed (attempt {Attempt}): {Error}",
+            part.Item.VideoId, part.Tag, slot.Name, part.Attempts, ex.Message);
         // A dropped connection takes the worker out at once; the reviver brings it back when it reconnects.
-        if (workers.GetSession(slot.Live.WorkerId) is null)
-            MarkDead(slot, ex.Message);
+        if (workers.GetSession(worker.Live.WorkerId) is null)
+            MarkDead(worker, ex.Message);
         if (failures >= timings.FailuresBeforeDead)
-            MarkDead(slot, ex.Message);
+            MarkDead(worker, ex.Message);
 
-        if (item.Attempts >= timings.MaxAttempts)
+        if (part.Attempts >= timings.MaxAttempts)
         {
-            Finish(item, slot, JobUnitOutcome.Failed, $"Gave up after {item.Attempts} attempts: {ex.Message}");
+            PartDone(part, null, JobUnitOutcome.Failed, $"Gave up after {part.Attempts} attempts: {ex.Message}");
             return;
         }
 
-        item.Unit?.Report(0, "Waiting to retry");
-        _queue.Writer.TryWrite(item);
+        part.Item.Unit?.Report(0, "Waiting to retry");
+        Enqueue(part);
     }
 
-    private void MarkDead(Slot slot, string reason)
+    private void MarkDead(WorkerState worker, string reason)
     {
-        lock (slot)
+        lock (worker)
         {
-            if (slot.Dead)
+            if (worker.Dead)
                 return;
-            slot.Dead = true;
-            slot.DeadSince = time.GetUtcNow();
-            slot.LastError = reason;
+            worker.Dead = true;
+            worker.DeadSince = time.GetUtcNow();
+            worker.LastError = reason;
         }
-        logger.LogWarning("Remote worker {Worker} taken out of the run: {Reason}", slot.Name, reason);
+        logger.LogWarning("Remote worker {Worker} taken out of the run: {Reason}", worker.Name, reason);
+        Signal(); // its loops stop; parts only its GPUs decoded may now go to other GPUs
     }
 
-    private void Finish(WorkItem item, Slot? slot, JobUnitOutcome outcome, string? message)
+    /// <summary>One part of a video is over; the video is when all its parts are (failed if any failed).</summary>
+    private void PartDone(Part part, SlotState? slot, JobUnitOutcome outcome, string? message)
+    {
+        var item = part.Item;
+        if (outcome == JobUnitOutcome.Succeeded && slot is not null)
+            Interlocked.Increment(ref slot.Succeeded);
+        if (outcome != JobUnitOutcome.Succeeded && message is not null)
+        {
+            lock (item.Errors)
+                item.Errors.Add(message);
+        }
+        // A part being split off (TakeFor) is counted while its sibling is still pending, so this never hits 0 early.
+        if (Interlocked.Decrement(ref item.PendingParts) > 0)
+            return;
+        Finish(item, item.Errors.Count == 0 ? JobUnitOutcome.Succeeded : JobUnitOutcome.Failed,
+            item.Errors.Count == 0 ? null : string.Join("; ", item.Errors));
+    }
+
+    private void Finish(WorkItem item, JobUnitOutcome outcome, string? message)
     {
         var unit = item.Unit ??= _progress.StartUnit(item.VideoId.ToString(CultureInfo.InvariantCulture), item.Label);
         unit.Complete(outcome, message);
@@ -375,18 +578,16 @@ internal sealed class RunExecutor(
         {
             case JobUnitOutcome.Succeeded:
                 Interlocked.Increment(ref _counters.Succeeded);
-                if (slot is not null) Interlocked.Increment(ref slot.Succeeded);
                 break;
             case JobUnitOutcome.Failed:
                 Interlocked.Increment(ref _counters.Failed);
-                if (slot is not null) Interlocked.Increment(ref slot.Failed);
                 break;
             default:
                 Interlocked.Increment(ref _counters.Skipped);
                 break;
         }
 
-        var live = _slots.Count(s => !s.Dead);
+        var live = _workers.Count(w => !w.Dead);
         _progress.Report(
             _counters.Total == 0 ? 1 : (double)_counters.Done / _counters.Total,
             $"{_counters.Done} / {_counters.Total} videos · {Volatile.Read(ref _counters.Failed)} failed · "
@@ -394,8 +595,8 @@ internal sealed class RunExecutor(
 
         if (Interlocked.Decrement(ref _remaining) == 0)
         {
-            _queue.Writer.TryComplete();
             _allDone.TrySetResult();
+            Signal();
         }
     }
 
@@ -409,25 +610,32 @@ internal sealed class RunExecutor(
             {
                 await Task.Delay(timings.ReviveInterval, time, _token);
 
-                foreach (var slot in _slots.Where(s => s.Dead))
+                foreach (var worker in _workers.Where(w => w.Dead))
                 {
-                    if (workers.GetSession(slot.Live.WorkerId) is null)
+                    if (workers.GetSession(worker.Live.WorkerId) is null)
                         continue;
-                    lock (slot)
+                    lock (worker)
                     {
-                        slot.Dead = false;
-                        slot.ConsecutiveFailures = 0;
+                        worker.Dead = false;
+                        worker.ConsecutiveFailures = 0;
                     }
-                    logger.LogInformation("Remote worker {Worker} is back; resuming work on it", slot.Name);
-                    StartWorkers(slot);
+                    logger.LogInformation("Remote worker {Worker} is back; resuming work on it", worker.Name);
+                    StartLoops(worker);
+                    Signal();
                 }
 
                 var now = time.GetUtcNow();
-                if (_slots.All(s => s.Dead && Volatile.Read(ref s.ActiveWorkers) == 0 && now - s.DeadSince >= timings.AllDeadGrace))
+                if (_workers.All(w => w.Dead && w.ActiveLoops == 0 && now - w.DeadSince >= timings.AllDeadGrace))
                 {
-                    var reasons = string.Join("; ", _slots.Select(s => $"{s.Name}: {s.LastError}"));
-                    while (_queue.Reader.TryRead(out var item))
-                        Finish(item, null, JobUnitOutcome.Failed, $"No live remote workers ({reasons})");
+                    var reasons = string.Join("; ", _workers.Select(w => $"{w.Name}: {w.LastError}"));
+                    List<Part> stranded;
+                    lock (_gate)
+                    {
+                        stranded = [.. _pending];
+                        _pending.Clear();
+                    }
+                    foreach (var part in stranded)
+                        PartDone(part, null, JobUnitOutcome.Failed, $"No live remote workers ({reasons})");
                 }
             }
         }

@@ -10,9 +10,10 @@ namespace RemoteHeavylifter.Worker.Media.Libav;
 /// <param name="FormatOptions">Extra demuxer/protocol options (from HL_FFMPEG_INPUT_ARGS).</param>
 /// <param name="KeyframesOnly">The decoder skips every frame but keyframes (fast seek).</param>
 /// <param name="HwSkipCodecs">Codecs decoded in software even when the source asks for the GPU.</param>
+/// <param name="HwCodecs">The only codecs decoded on the GPU; null allows any.</param>
 internal sealed record DecodeSettings(
     int Threads, bool SliceThreads, bool Lenient = false, IReadOnlyList<KeyValuePair<string, string>>? FormatOptions = null,
-    bool KeyframesOnly = false, IReadOnlyList<string>? HwSkipCodecs = null);
+    bool KeyframesOnly = false, IReadOnlyList<string>? HwSkipCodecs = null, IReadOnlyCollection<string>? HwCodecs = null);
 
 /// <summary>
 /// One opened source and a decoder for its main video stream (on the GPU when the source asks for it). Frames come out
@@ -133,9 +134,11 @@ internal sealed unsafe class LibavInput : IDisposable
 
         // The GPU only for codecs it is not told to skip (decoders libav has but that fail, such as vc1_qsv).
         var hw = source.HwDecode;
-        if (hw is { } asked && settings.HwSkipCodecs?.Contains(Name(codec), StringComparer.OrdinalIgnoreCase) == true)
+        if (hw is { } asked
+            && (settings.HwSkipCodecs?.Contains(Name(codec), StringComparer.OrdinalIgnoreCase) == true
+                || settings.HwCodecs?.Contains(Name(codec), StringComparer.OrdinalIgnoreCase) == false))
         {
-            _log.LogDebug("{What}: {Codec} is decoded in software (skipped for {Accel})", what, Name(codec), asked.Accel);
+            _log.LogDebug("{What}: {Codec} is decoded in software (not decoded by {Accel})", what, Name(codec), asked.Accel);
             hw = null;
         }
 
@@ -276,18 +279,24 @@ internal sealed unsafe class LibavInput : IDisposable
     /// <see cref="MaxSeekBackUs"/>, so the target frame is decoded rather than skipped.</summary>
     private AVFrame* SeekNotPast(long targetUs, long target, string what)
     {
+        var overshoot = ToStream(SeekOvershootUs) - ToStream(0);
         for (var back = 0L; ; back = back == 0 ? 5_000_000 : back * 2)
         {
             var at = Math.Max(targetUs - back, StartMicroseconds);
             Seek(at, what);
             var frame = NextFrame(what, download: false);
-            if (frame is null || frame->pts == ffmpeg.AV_NOPTS_VALUE || frame->pts <= target || at == StartMicroseconds || back >= MaxSeekBackUs)
+            // A frame or two past the target is the stream's own keyframe placement, not a seek gone wrong.
+            if (frame is null || frame->pts == ffmpeg.AV_NOPTS_VALUE || frame->pts <= target + overshoot || at == StartMicroseconds
+                || back >= MaxSeekBackUs)
                 return frame;
             _log.LogDebug("{What}: seek to {Target} µs landed at pts {Pts}; seeking {Back} s earlier", what, targetUs, frame->pts, (back == 0 ? 5_000_000 : back * 2) / 1_000_000);
         }
     }
 
     private const long MaxSeekBackUs = 80_000_000;
+
+    /// <summary>How far past the target a seek may land before it counts as having overshot.</summary>
+    private const long SeekOvershootUs = 500_000;
 
     /// <summary>
     /// Fast seek (with <see cref="DecodeSettings.KeyframesOnly"/>): the keyframe the seek to <paramref name="targetUs"/>

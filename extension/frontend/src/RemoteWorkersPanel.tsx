@@ -13,7 +13,7 @@ import {
   type WorkerInput,
   type WorkerView,
 } from "./api";
-import { Button, Checkbox, ExpandableCard, Message, Section, StateBadge, describeLoad, inputClass } from "./ui";
+import { Button, Checkbox, ExpandableCard, Message, Section, StateBadge, describeLoad, describeSlot, inputClass } from "./ui";
 
 interface Draft {
   key: string;
@@ -26,7 +26,6 @@ interface Draft {
   url: string;
   coveUrlOverride: string;
   enabled: boolean;
-  maxConcurrency: number;
   sourceAccess: SourceAccess;
   pathMappings: PathMapping[];
 }
@@ -46,7 +45,6 @@ function toDraft(worker: WorkerView): Draft {
     url: worker.url ?? "",
     coveUrlOverride: worker.coveUrlOverride ?? "",
     enabled: worker.enabled,
-    maxConcurrency: worker.maxConcurrency,
     sourceAccess: worker.sourceAccess,
     pathMappings: worker.pathMappings,
   };
@@ -61,7 +59,6 @@ function toInput(draft: Draft): WorkerInput {
     url: draft.url.trim() || null,
     coveUrlOverride: draft.coveUrlOverride.trim() || null,
     enabled: draft.enabled,
-    maxConcurrency: draft.maxConcurrency,
     sourceAccess: draft.sourceAccess,
     pathMappings: draft.pathMappings,
   };
@@ -143,7 +140,6 @@ export function RemoteWorkersPanel() {
         url: "",
         coveUrlOverride: "",
         enabled: true,
-        maxConcurrency: 2,
         sourceAccess: "http",
         pathMappings: [],
       },
@@ -233,12 +229,19 @@ function CoveUrlSettings() {
   const current = value ?? settingsQuery.data?.coveUrlForWorkers ?? "";
 
   const save = useMutation({
-    mutationFn: () => api.saveSettings({ coveUrlForWorkers: current.trim() || null }),
+    mutationFn: () => api.saveSettings({ coveUrlForWorkers: current.trim() || null, cpuHelpsGpu: settingsQuery.data?.cpuHelpsGpu ?? false }),
     onSuccess: (settings) => {
       queryClient.setQueryData(queryKeys.settings, settings);
       setValue(null);
       setStatus({ tone: "success", text: "Saved." });
     },
+    onError: (error) => setStatus({ tone: "error", text: (error as Error).message }),
+  });
+
+  const helpSave = useMutation({
+    mutationFn: (cpuHelpsGpu: boolean) =>
+      api.saveSettings({ coveUrlForWorkers: settingsQuery.data?.coveUrlForWorkers ?? null, cpuHelpsGpu }),
+    onSuccess: (settings) => queryClient.setQueryData(queryKeys.settings, settings),
     onError: (error) => setStatus({ tone: "error", text: (error as Error).message }),
   });
 
@@ -268,6 +271,12 @@ function CoveUrlSettings() {
         The address workers use to read videos from Cove and upload results. Workers that connect to Cove use the
         address they connected to unless this is set; a worker can also override it.
       </p>
+      <Checkbox
+        label="Let CPU slots help with GPU work: when every GPU slot is busy, an idle CPU slot does a waiting video's cover, sprite and phash (its preview stays on a GPU)"
+        checked={settingsQuery.data?.cpuHelpsGpu ?? false}
+        disabled={!settingsQuery.data || helpSave.isPending}
+        onChange={(cpuHelpsGpu) => helpSave.mutate(cpuHelpsGpu)}
+      />
       {settingsQuery.data && !settingsQuery.data.coveAuthEnabled ? (
         <p className="text-[11px] text-amber-300">
           Cove's sign-in is off. Workers must then reach Cove from a local network address with a local host name
@@ -373,17 +382,24 @@ function WorkerCard({
               placeholder="ws://192.168.1.20:8750/rpc — leave empty if the worker connects to Cove"
             />
           </label>
-          <label className="block space-y-1">
-            <span className="text-xs text-secondary">Max parallel videos</span>
-            <input
-              className={inputClass}
-              type="number"
-              min={1}
-              max={64}
-              value={draft.maxConcurrency}
-              onChange={(e) => change({ maxConcurrency: Math.max(1, Math.min(64, Number(e.target.value) || 1)) })}
-            />
-          </label>
+          <div className="block space-y-1">
+            <span className="text-xs text-secondary">Slots (set on the worker)</span>
+            <div className="flex min-h-10 flex-wrap items-center gap-1.5 text-sm">
+              {health?.slots?.length ? (
+                health.slots.map((slot) => (
+                  <span
+                    key={slot.id}
+                    title={describeSlot(slot)}
+                    className="rounded border border-border bg-card px-2 py-0.5 font-mono text-xs text-secondary"
+                  >
+                    {slot.id} ×{slot.capacity}
+                  </span>
+                ))
+              ) : (
+                <span className="text-xs text-muted">Shown when the worker is connected</span>
+              )}
+            </div>
+          </div>
           <label className="block space-y-1 sm:col-span-2">
             <span className="text-xs text-secondary">Cove URL for this worker (optional)</span>
             <input

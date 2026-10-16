@@ -112,11 +112,11 @@ public class ParityTests
     public void CoverArgs()
     {
         var c = P["coverArgs"]!;
-        var args = CoverGenerator.BuildCoverArgs([], Specs.Local((string)c["source"]!), (double)c["seek"]!,
+        var args = CommandLine.BuildCoverArgs([], Specs.Local((string)c["source"]!), (double)c["seek"]!,
             (string?)c["filter"], (string)c["output"]!);
         Assert.Equal(Strings(c["expected"]), args);
 
-        var withFilter = CoverGenerator.BuildCoverArgs(["-hwaccel", "auto"], Specs.Local("/s.mp4"), 1, "v360=input=e", "/o.jpg");
+        var withFilter = CommandLine.BuildCoverArgs(["-hwaccel", "auto"], Specs.Local("/s.mp4"), 1, "v360=input=e", "/o.jpg");
         Assert.Equal(["-hwaccel", "auto"], withFilter[..2]);
         Assert.Equal("v360=input=e", withFilter[withFilter.IndexOf("-vf") + 1]);
     }
@@ -125,14 +125,14 @@ public class ParityTests
     public void SplicedFilter()
     {
         var s = P["splicedFilter"]!;
-        Assert.Equal((string)s["expected"]!, PreviewGenerator.SplicedFilter((int)s["segments"]!, (string)s["scale"]!));
+        Assert.Equal((string)s["expected"]!, CommandLine.SplicedFilter((int)s["segments"]!, (string)s["scale"]!));
     }
 
     [Fact]
     public void SplicedArgsShape()
     {
         var plan = Timing.PlanPreview(30, 12, 0.75, "0", "0", false)!;
-        var args = PreviewGenerator.SplicedArgs([], "libx264", Specs.Local("/m/a.mp4"), plan, Specs.Preview(preset: "slow"), "/o/p.mp4");
+        var args = CommandLine.SplicedArgs([], "libx264", Specs.Local("/m/a.mp4"), plan, Specs.Preview(preset: "slow"), "/o/p.mp4");
         Assert.Equal(["-v", "error", "-y"], args[..3]);
         Assert.Equal(12, args.Count(a => a == "-i"));
         Assert.Equal(["-ss", "1.25", "-t", "0.75", "-i", "/m/a.mp4"], args[3..9]);
@@ -149,12 +149,12 @@ public class ParityTests
     {
         var spec = Specs.Preview();
         var plain = Timing.PlanPreview(5, 12, 0.75, "0", "0", false)!;
-        var args = PreviewGenerator.SingleArgs([], "libx264", Specs.Local("/m/a.mp4"), 5, plain, spec, "/o/p.mp4");
+        var args = CommandLine.SingleArgs([], "libx264", Specs.Local("/m/a.mp4"), 5, plain, spec, "/o/p.mp4");
         Assert.DoesNotContain("-ss", args);
         Assert.DoesNotContain("-t", args);
 
         var trimmed = Timing.PlanPreview(5, 12, 0.75, "1", "1", false)!;
-        args = PreviewGenerator.SingleArgs([], "h264_vaapi", Specs.Local("/m/a.mp4"), 5, trimmed, spec, "/o/p.mp4");
+        args = CommandLine.SingleArgs([], "h264_vaapi", Specs.Local("/m/a.mp4"), 5, trimmed, spec, "/o/p.mp4");
         Assert.Equal("1.00", args[args.IndexOf("-ss") + 1]);
         Assert.Equal("3.00", args[args.IndexOf("-t") + 1]);
         Assert.Equal("scale=640:-2,format=nv12,hwupload", args[args.IndexOf("-vf") + 1]);
@@ -164,7 +164,7 @@ public class ParityTests
     [Fact]
     public void BatchArgs()
     {
-        var args = SpriteGenerator.SpriteBatchArgs(Specs.Local("/m/a.mp4"), "/tmp/f", [1.0, 3.0], 0, 2, 160, null);
+        var args = CommandLine.SpriteBatchArgs(Specs.Local("/m/a.mp4"), "/tmp/f", [1.0, 3.0], 0, 2, 160, null);
         Assert.Equal(
             [
                 "-v", "error", "-y",
@@ -176,7 +176,7 @@ public class ParityTests
                 SpriteGenerator.FramePath("/tmp/f", 1),
             ],
             args);
-        var vr = SpriteGenerator.SpriteBatchArgs(Specs.Local("/m/a.mp4"), "/tmp/f", [1.0], 0, 1, 160, "v360=input=he");
+        var vr = CommandLine.SpriteBatchArgs(Specs.Local("/m/a.mp4"), "/tmp/f", [1.0], 0, 1, 160, "v360=input=he");
         Assert.Equal("v360=input=he,scale=160:-2", vr[vr.IndexOf("-vf") + 1]);
     }
 

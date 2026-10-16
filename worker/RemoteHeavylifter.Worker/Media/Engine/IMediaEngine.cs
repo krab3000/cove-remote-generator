@@ -5,9 +5,9 @@ using SixLabors.ImageSharp.PixelFormats;
 namespace RemoteHeavylifter.Worker.Media;
 
 /// <summary>
-/// How the worker reads and encodes video: the ffmpeg/ffprobe command line (<see cref="CliMediaEngine"/>) or libav in
-/// this process (<see cref="LibavMediaEngine"/>). The generators keep everything both share (plans, grids, hashes,
-/// committing outputs); an engine only turns a source into frames, a cover file or a preview file.
+/// How the worker reads and encodes video: libav in this process (<see cref="Libav.LibavMediaEngine"/>), one engine per
+/// slot pool. The generators keep the rest (plans, grids, hashes, committing outputs); an engine only turns a source
+/// into frames, a cover file or a preview file. The tests also run Cove's ffmpeg command lines through it as a reference.
 /// </summary>
 public interface IMediaEngine
 {

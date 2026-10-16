@@ -24,7 +24,7 @@ public interface ITaskReporter
 /// cancelled if its session goes away.
 /// </summary>
 public sealed class TaskRunner(
-    WorkerOptions options, WorkerToken token, CoveHttpClient cove, SourceCache sourceCache, IMediaEngine engine,
+    WorkerOptions options, WorkerToken token, CoveHttpClient cove, SourceCache sourceCache, SlotPool slots,
     ILogger<TaskRunner> logger)
 {
     private static readonly IReadOnlyDictionary<string, double> Weights = new Dictionary<string, double>
@@ -37,19 +37,20 @@ public sealed class TaskRunner(
 
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _running = new(StringComparer.Ordinal);
     private readonly object _gate = new();
-    private int _nextDevice = -1;
 
-    public int Capacity => options.MaxConcurrency;
-    public int Running => _running.Count;
+    public SlotPool Slots => slots;
 
-    /// <summary>Start a task unless the worker is full. Returns false when busy.</summary>
+    /// <summary>Start a task on its slot pool (<see cref="TaskRequest.SlotId"/>) unless that is full or unknown.
+    /// Returns false when busy.</summary>
     public bool TryStart(TaskRequest request, ITaskReporter reporter, CancellationToken sessionToken)
     {
         CancellationTokenSource cts;
+        Slot slot;
         lock (_gate)
         {
-            if (_running.Count >= options.MaxConcurrency || _running.ContainsKey(request.TaskId))
+            if (_running.ContainsKey(request.TaskId) || slots.Find(request.SlotId) is not { } found || !found.TryTake())
                 return false;
+            slot = found;
             cts = CancellationTokenSource.CreateLinkedTokenSource(sessionToken);
             _running[request.TaskId] = cts;
         }
@@ -58,7 +59,7 @@ public sealed class TaskRunner(
         {
             try
             {
-                var result = await RunAsync(request, reporter, cts.Token);
+                var result = await RunAsync(request, reporter, cts.Token, slot);
                 await reporter.FinishedAsync(result);
             }
             catch (Exception ex)
@@ -68,6 +69,7 @@ public sealed class TaskRunner(
             finally
             {
                 _running.TryRemove(request.TaskId, out _);
+                slot.Release();
                 cts.Dispose();
             }
         }, CancellationToken.None);
@@ -87,13 +89,13 @@ public sealed class TaskRunner(
         {
             if (ReadableFile(request.SourcePath, request.TaskId) is { } file)
             {
-                var fileDuration = await engine.ProbeDurationAsync(MediaSource.ForFile(file.FullName, file.Length), ct);
+                var fileDuration = await slots.Slots[0].Engine.ProbeDurationAsync(MediaSource.ForFile(file.FullName, file.Length), ct);
                 return fileDuration > 0
                     ? new ProbeResult(true, fileDuration, null, SourceAccess.File)
                     : new ProbeResult(false, null, $"ffprobe could not read {file.FullName}", SourceAccess.File);
             }
             await cove.CheckSourceAsync(request.SourceUrl, ct);
-            var duration = await engine.ProbeDurationAsync(MediaSource.ForCove(request.SourceUrl, token.Value, 0), ct);
+            var duration = await slots.Slots[0].Engine.ProbeDurationAsync(MediaSource.ForCove(request.SourceUrl, token.Value, 0), ct);
             return duration > 0
                 ? new ProbeResult(true, duration, null, SourceAccess.Http)
                 : new ProbeResult(false, null, "ffprobe could not read the video over HTTP", SourceAccess.Http);
@@ -123,8 +125,11 @@ public sealed class TaskRunner(
         }
     }
 
-    internal async Task<TaskResult> RunAsync(TaskRequest request, ITaskReporter reporter, CancellationToken ct)
+    /// <summary>Runs <paramref name="request"/> on <paramref name="slot"/> (default: the one it names).</summary>
+    internal async Task<TaskResult> RunAsync(TaskRequest request, ITaskReporter reporter, CancellationToken ct, Slot? slot = null)
     {
+        slot ??= slots.Find(request.SlotId) ?? slots.Slots[0];
+        var engine = slot.Engine;
         var workDir = Path.Combine(options.TasksDir, SafeName(request.TaskId));
         var artifacts = new ConcurrentDictionary<string, ArtifactResult>(StringComparer.Ordinal);
         var steps = new List<string>();
@@ -133,7 +138,7 @@ public sealed class TaskRunner(
         if (request.Sprite is not null) steps.Add(ArtifactKinds.Sprite);
         if (request.Phash is not null) steps.Add(ArtifactKinds.Phash);
 
-        logger.LogInformation("Task {TaskId}: video {VideoId}, {Steps}", request.TaskId, request.VideoId, string.Join("+", steps));
+        logger.LogInformation("Task {TaskId}: video {VideoId}, {Steps} on {Slot}", request.TaskId, request.VideoId, string.Join("+", steps), slot.Id);
         try
         {
             Directory.CreateDirectory(workDir);
@@ -154,12 +159,7 @@ public sealed class TaskRunner(
             }
             using var lease = cached;
             var duration = request.Duration > 0 ? request.Duration : await engine.ProbeDurationAsync(source, ct);
-            if (options.HwAccel is { } hwAccel)
-            {
-                var device = NextDevice();
-                source = source.WithHardwareDecode(hwAccel, device);
-                logger.LogInformation("Task {TaskId}: decoding with {HwAccel}{Device}", request.TaskId, hwAccel, device is null ? "" : $" on device {device}");
-            }
+            source = slot.Decode(source);
 
             var total = steps.Sum(s => Weights[s]);
             var done = 0.0;
@@ -167,7 +167,7 @@ public sealed class TaskRunner(
             {
                 await reporter.ProgressAsync(new TaskProgress(request.TaskId, Math.Round(done / total, 4), step));
                 var before = cached?.Stats;
-                await RunStepAsync(request, step, source, duration, workDir, artifacts, ct);
+                await RunStepAsync(engine, request, step, source, duration, workDir, artifacts, ct);
                 if (cached is not null)
                     LogCache(request.TaskId, step, cached.Stats - before!);
                 done += Weights[step];
@@ -200,7 +200,7 @@ public sealed class TaskRunner(
     /// <summary>Generates and uploads one artifact; a failure with hardware decoding is retried in software. Its scratch
     /// and outputs live in their own directory, deleted as soon as the step is over.</summary>
     private async Task RunStepAsync(
-        TaskRequest request, string step, MediaSource source, double duration, string workDir,
+        IMediaEngine engine, TaskRequest request, string step, MediaSource source, double duration, string workDir,
         ConcurrentDictionary<string, ArtifactResult> artifacts, CancellationToken ct)
     {
         var stepDir = Path.Combine(workDir, step);
@@ -210,7 +210,7 @@ public sealed class TaskRunner(
         {
             try
             {
-                await GenerateStepAsync(request, step, source, duration, stepDir, artifacts, ct);
+                await GenerateStepAsync(engine, request, step, source, duration, stepDir, artifacts, ct);
             }
             catch (MediaException ex) when (source.HardwareDecode)
             {
@@ -218,7 +218,7 @@ public sealed class TaskRunner(
                     request.TaskId, step, ex.Message);
                 Outputs.RemoveDirQuietly(stepDir);
                 outcome = "done in software";
-                await GenerateStepAsync(request, step, source.Software, duration, stepDir, artifacts, ct);
+                await GenerateStepAsync(engine, request, step, source.Software, duration, stepDir, artifacts, ct);
             }
         }
         catch (MediaException ex)
@@ -242,7 +242,7 @@ public sealed class TaskRunner(
     }
 
     private async Task GenerateStepAsync(
-        TaskRequest request, string step, MediaSource source, double duration, string stepDir,
+        IMediaEngine engine, TaskRequest request, string step, MediaSource source, double duration, string stepDir,
         ConcurrentDictionary<string, ArtifactResult> artifacts, CancellationToken ct)
     {
         switch (step)
@@ -277,13 +277,6 @@ public sealed class TaskRunner(
                 break;
             }
         }
-    }
-
-    /// <summary>The hardware decoding device for the next task, taking <see cref="WorkerOptions.HwAccelDevices"/> in turn.</summary>
-    private string? NextDevice()
-    {
-        var devices = options.HwAccelDevices;
-        return devices.Count == 0 ? null : devices[(int)((uint)Interlocked.Increment(ref _nextDevice) % (uint)devices.Count)];
     }
 
     private void LogCache(string taskId, string scope, CacheStats stats) =>

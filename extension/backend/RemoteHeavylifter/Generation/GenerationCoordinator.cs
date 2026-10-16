@@ -43,7 +43,8 @@ public sealed class GenerationCoordinator(
             logger.LogWarning("Remote generation: {Note}", note);
 
         var paths = new GeneratedPaths(config.GeneratedPath);
-        var run = new RunContext(Guid.NewGuid().ToString("N")[..12], paths, PreviewSettings.From(config), request.Overwrite);
+        var run = new RunContext(Guid.NewGuid().ToString("N")[..12], paths, PreviewSettings.From(config), request.Overwrite,
+            (await settingsStore.GetAsync(ct)).CpuHelpsGpu);
 
         progress.Report(0, "Selecting videos…");
         SelectionResult selection;
@@ -74,7 +75,7 @@ public sealed class GenerationCoordinator(
         }
 
         logger.LogInformation("Remote generation {RunId}: {Count} videos on {Servers}",
-            run.RunId, selection.Work.Count, string.Join(", ", live.Select(l => $"{l.Name}×{l.Slots}")));
+            run.RunId, selection.Work.Count, string.Join(", ", live.SelectMany(l => l.Slots.Select(s => $"{s.Id}@{l.Name}×{s.Capacity}"))));
 
         IReadOnlyDictionary<string, int> perWorker;
         try
@@ -110,13 +111,18 @@ public sealed class GenerationCoordinator(
                 notes.Add($"{worker.Name}: set the Cove URL for workers so it can read and upload files");
                 continue;
             }
-            live.Add(new LiveWorker(worker.Id, worker.Name, Math.Max(1, Math.Min(worker.MaxConcurrency, session.Info.Capacity)), baseUrl,
-                worker.DirectMappings));
+            if (session.Info.Slots.Sum(s => s.Capacity) == 0)
+            {
+                notes.Add($"{worker.Name} has no slots");
+                continue;
+            }
+            live.Add(new LiveWorker(worker.Id, worker.Name, session.Info.Slots, baseUrl, worker.DirectMappings));
         }
         return (live, notes);
     }
 
-    internal static string Summarize(RunCounters counters, IReadOnlyDictionary<string, int> perWorker, TimeSpan elapsed)
+    /// <param name="perSlot">Parts finished per slot (slot@worker).</param>
+    internal static string Summarize(RunCounters counters, IReadOnlyDictionary<string, int> perSlot, TimeSpan elapsed)
     {
         var text = $"Generated {counters.Succeeded} of {counters.Total} videos remotely";
         if (counters.Failed > 0)
@@ -124,8 +130,8 @@ public sealed class GenerationCoordinator(
         if (counters.Skipped > 0)
             text += $", {counters.Skipped} skipped";
         text += $" in {(elapsed.TotalHours >= 1 ? $"{(int)elapsed.TotalHours}h {elapsed.Minutes}m" : $"{elapsed.Minutes}m {elapsed.Seconds}s")}";
-        if (perWorker.Count > 0)
-            text += " · " + string.Join(", ", perWorker.Select(p => $"{p.Key}: {p.Value}"));
+        if (perSlot.Any(p => p.Value > 0))
+            text += " · " + string.Join(", ", perSlot.Where(p => p.Value > 0).Select(p => $"{p.Key}: {p.Value}"));
         return text;
     }
 

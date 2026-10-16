@@ -1,5 +1,4 @@
 using System.Globalization;
-using RemoteHeavylifter.Worker.Media;
 
 namespace RemoteHeavylifter.Worker.Hosting;
 
@@ -19,31 +18,30 @@ public sealed record WorkerOptions
     public string? Token { get; init; }
 
     public string DataDir { get; init; } = "./data";
-    public int MaxConcurrency { get; init; } = Math.Max(1, Environment.ProcessorCount / 4);
-    public string Ffmpeg { get; init; } = Bundled("ffmpeg");
-    public string Ffprobe { get; init; } = Bundled("ffprobe");
+    /// <summary>Extra demuxer/protocol options for every source (HL_FFMPEG_INPUT_ARGS), as ffmpeg input options.</summary>
     public IReadOnlyList<string> FfmpegInputArgs { get; init; } = [];
-    public string Encoder { get; init; } = EncoderArgs.SoftwareEncoder;
 
-    /// <summary>ffmpeg hwaccel for decoding sources, e.g. <c>cuda</c>; null decodes in software.</summary>
-    public string? HwAccel { get; init; }
+    /// <summary>Slots per Intel GPU, as (GPU index, slots); null gives every detected GPU <see cref="DefaultGpuSlots"/>
+    /// unless another --hv-*-slots is set.</summary>
+    public IReadOnlyList<(int Gpu, int Slots)>? IntelSlots { get; init; }
 
-    /// <summary>Hardware decoding devices (e.g. GPU indexes 0 and 1); tasks take them in turn. Empty uses ffmpeg's default.</summary>
-    public IReadOnlyList<string> HwAccelDevices { get; init; } = [];
+    /// <summary>Slots per NVIDIA GPU, as <see cref="IntelSlots"/>.</summary>
+    public IReadOnlyList<(int Gpu, int Slots)>? NvidiaSlots { get; init; }
 
-    /// <summary>Codecs decoded in software even with <see cref="HwAccel"/>; null means <see cref="DefaultHwSkipCodecs"/>.</summary>
-    public IReadOnlyList<string>? HwAccelSkipCodecs { get; init; }
+    /// <summary>Slots for the Mac's media engine (VideoToolbox), as <see cref="IntelSlots"/> (its index is 0).</summary>
+    public IReadOnlyList<(int Gpu, int Slots)>? AppleSlots { get; init; }
 
-    /// <summary>The codecs actually decoded in software: <see cref="HwAccelSkipCodecs"/>, or the hwaccel's known-broken ones.</summary>
-    public IReadOnlyList<string> HwSkipCodecs => HwAccelSkipCodecs ?? DefaultHwSkipCodecs(HwAccel);
+    /// <summary>How Intel GPUs decode and encode: <c>qsv</c> (Quick Sync) or <c>vaapi</c>.</summary>
+    public string IntelApi { get; init; } = "qsv";
 
-    /// <summary>Decoders libav has that crash the process: FFmpeg's vc1_qsv segfaults (FFmpeg 9.0, Intel media
-    /// runtime 23.2 and 26.3).</summary>
-    public static IReadOnlyList<string> DefaultHwSkipCodecs(string? hwAccel) => hwAccel == "qsv" ? ["vc1"] : [];
+    /// <summary>Videos at once decoded and encoded in software.</summary>
+    public int CpuSlots { get; init; } = 1;
 
-    /// <summary>How video is read and encoded: <c>auto</c> (libav in-process when its libraries load, else the command
-    /// line), <c>libav</c> (required) or <c>cli</c> (ffmpeg/ffprobe processes).</summary>
-    public string MediaEngine { get; init; } = "auto";
+    /// <summary>Slots each detected GPU gets when no --hv-*-slots flag is given.</summary>
+    public const int DefaultGpuSlots = 2;
+
+    /// <summary>Codecs decoded in software on every GPU, whatever it reports.</summary>
+    public IReadOnlyList<string> HwSkipCodecs { get; init; } = [];
 
     /// <summary>Directory with the FFmpeg shared libraries; default: the bundled <c>ffmpeg</c> folder.</summary>
     public string? FfmpegLibs { get; init; }
@@ -60,9 +58,16 @@ public sealed record WorkerOptions
     /// <summary>RAM for source bytes shared by all running tasks; 0 makes ffmpeg read straight from Cove.</summary>
     public int SourceCacheMb { get; init; } = 1024;
 
-    public string TasksDir => Path.Combine(DataDir, "tasks");
+    /// <summary><c>bench</c>: the videos-at-once counts to try per slot pool.</summary>
+    public IReadOnlyList<int> BenchCounts { get; init; } = [1, 2, 3, 4];
 
-    public MediaContext Media => new(Ffmpeg, Ffprobe, FfmpegInputArgs, Encoder);
+    /// <summary><c>bench</c>: the clips to run (1080p, 4k).</summary>
+    public IReadOnlyList<string> BenchClips { get; init; } = ["1080p"];
+
+    /// <summary>Malformed values found while reading; reported by <see cref="Validate"/>.</summary>
+    public IReadOnlyList<string> ParseErrors { get; init; } = [];
+
+    public string TasksDir => Path.Combine(DataDir, "tasks");
 
     /// <summary>Every setting's environment variable, with its <c>--help</c> text.</summary>
     public static readonly IReadOnlyList<(string Env, string Help)> Settings =
@@ -71,21 +76,24 @@ public sealed record WorkerOptions
         ("HL_COVE_URL", "Connect to Cove here (the worker connects to Cove), e.g. http://192.168.1.10:5073."),
         ("HL_WORKER_NAME", "Name shown in Cove. Default: the host name."),
         ("HL_WORKER_TOKEN", "Token Cove knows the worker by (16+ characters). Default: generated into the data directory."),
-        ("HL_DATA_DIR", "Token and scratch files. Default: ./data."),
-        ("HL_MAX_CONCURRENCY", "Videos at once. Default: CPU cores / 4, at least 1."),
+        ("HL_DATA_DIR", "Token, scratch and bench clips. Default: ./data."),
+        ("HL_HV_INTEL_SLOTS", "gpu_idx,slots for an Intel GPU (repeat the flag, or 0,2;1,2): videos at once on it; 0 turns it off. Default: every detected GPU gets 2, unless an --hv-*-slots flag is given."),
+        ("HL_HV_NVIDIA_SLOTS", "gpu_idx,slots for an NVIDIA GPU, as --hv-intel-slots."),
+        ("HL_HV_APPLE_SLOTS", "0,slots for the Mac's media engine (VideoToolbox), as --hv-intel-slots."),
+        ("HL_CPU_SLOTS", "Videos at once decoded and encoded in software. Default: 1."),
+        ("HL_INTEL_API", "qsv (Quick Sync) or vaapi: how Intel GPUs decode and encode. Default: qsv."),
+        ("HL_HWACCEL_SKIP_CODECS", "Comma-separated codecs decoded in software on every GPU, e.g. vc1,mpeg2video."),
         ("HL_SOURCE_CACHE_MB", "RAM for source bytes read over HTTP, shared by all tasks; 0 turns it off. Default: 1024."),
-        ("HL_H264_ENCODER", "Preview encoder, e.g. h264_nvenc, h264_qsv. Default: libx264."),
-        ("HL_HWACCEL", "Decode on the GPU with this ffmpeg hwaccel, e.g. cuda, qsv, vaapi; none decodes in software."),
-        ("HL_HWACCEL_DEVICES", "Comma-separated hwaccel devices that tasks take in turn, e.g. 0,1."),
-        ("HL_HWACCEL_SKIP_CODECS", "Comma-separated codecs decoded in software even with a hwaccel, e.g. vc1,mpeg2video; none skips nothing. Default: vc1 for qsv, else none."),
-        ("HL_FFMPEG_INPUT_ARGS", "Extra ffmpeg input options, separated by spaces."),
-        ("HL_MEDIA_ENGINE", "auto, libav or cli. Default: auto."),
+        ("HL_FFMPEG_INPUT_ARGS", "Extra demuxer/protocol options for every source, as ffmpeg input options separated by spaces."),
         ("HL_FFMPEG_LIBS", "Directory with the FFmpeg shared libraries. Default: the bundled ffmpeg folder."),
         ("HL_SPRITE_SEEK", "exact or keyframe. Default: exact."),
         ("HL_DECODE_THREADS", "Decoder threads per video (libav). Default: chosen per operation."),
-        ("HL_FFMPEG", "ffmpeg executable. Default: the bundled one, else ffmpeg on PATH."),
-        ("HL_FFPROBE", "ffprobe executable. Default: the bundled one, else ffprobe on PATH."),
+        ("HL_BENCH_COUNTS", "bench: comma-separated videos-at-once counts to try per GPU and the CPU. Default: 1,2,3,4."),
+        ("HL_BENCH_CLIPS", "bench: comma-separated clips, 1080p and/or 4k. Default: 1080p."),
     ];
+
+    /// <summary>Settings a flag may be given for more than once; the values are joined with <c>;</c>.</summary>
+    private static readonly HashSet<string> Repeatable = ["HL_HV_INTEL_SLOTS", "HL_HV_NVIDIA_SLOTS", "HL_HV_APPLE_SLOTS"];
 
     /// <summary>The command-line flag for a setting: HL_COVE_URL → --cove-url.</summary>
     public static string Flag(string env) => "--" + env["HL_".Length..].ToLowerInvariant().Replace('_', '-');
@@ -94,7 +102,8 @@ public sealed record WorkerOptions
     public static string Usage()
     {
         var width = Settings.Max(s => Flag(s.Env).Length + s.Env.Length) + 4;
-        return "Usage: RemoteHeavylifter.Worker [--flag value | --flag=value] ...\n"
+        return "Usage: RemoteHeavylifter.Worker [bench] [--flag value | --flag=value] ...\n"
+               + "  bench: measure each GPU and the CPU on Big Buck Bunny clips (downloaded once) and suggest slots.\n"
                + "Each flag can be set as its environment variable instead; a flag wins.\n\n"
                + string.Concat(Settings.Select(s => $"  {(Flag(s.Env) + "  " + s.Env).PadRight(width)}{s.Help}\n"));
     }
@@ -109,6 +118,10 @@ public sealed record WorkerOptions
         var flags = new Dictionary<string, string>();
         var errors = new List<string>();
         var help = false;
+
+        void Set(string name, string value) =>
+            flags[name] = Repeatable.Contains(name) && flags.TryGetValue(name, out var earlier) ? $"{earlier};{value}" : value;
+
         for (var i = 0; i < args.Count; i++)
         {
             var arg = args[i];
@@ -122,9 +135,9 @@ public sealed record WorkerOptions
             if (!byFlag.TryGetValue(flag, out var name))
                 errors.Add($"Unknown option {arg}; see --help.");
             else if (eq >= 0)
-                flags[name] = arg[(eq + 1)..];
+                Set(name, arg[(eq + 1)..]);
             else if (i + 1 < args.Count && !args[i + 1].StartsWith("--", StringComparison.Ordinal))
-                flags[name] = args[++i];
+                Set(name, args[++i]);
             else
                 errors.Add($"{flag} needs a value.");
         }
@@ -135,8 +148,14 @@ public sealed record WorkerOptions
     {
         read ??= Environment.GetEnvironmentVariable;
         string? Get(string name) => read(name) is { } value && !string.IsNullOrWhiteSpace(value) ? value.Trim() : null;
+        string[] List(string? value) => value?.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries) ?? [];
 
         var defaults = new WorkerOptions();
+        var parseErrors = new List<string>();
+        var counts = List(Get("HL_BENCH_COUNTS"))
+            .Select(c => int.TryParse(c, NumberStyles.Integer, CultureInfo.InvariantCulture, out var n) && n > 0 ? n : -1).ToList();
+        if (counts.Contains(-1))
+            parseErrors.Add("HL_BENCH_COUNTS must be positive numbers, e.g. 1,2,3,4.");
         return new WorkerOptions
         {
             ListenUrl = Get("HL_LISTEN_URL"),
@@ -144,21 +163,17 @@ public sealed record WorkerOptions
             Name = Get("HL_WORKER_NAME") ?? defaults.Name,
             Token = Get("HL_WORKER_TOKEN"),
             DataDir = Get("HL_DATA_DIR") ?? defaults.DataDir,
-            MaxConcurrency = int.TryParse(Get("HL_MAX_CONCURRENCY"), NumberStyles.Integer, CultureInfo.InvariantCulture, out var max) && max > 0
-                ? max
-                : defaults.MaxConcurrency,
-            Ffmpeg = Get("HL_FFMPEG") ?? defaults.Ffmpeg,
-            Ffprobe = Get("HL_FFPROBE") ?? defaults.Ffprobe,
             FfmpegInputArgs = Get("HL_FFMPEG_INPUT_ARGS")?.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries) ?? [],
-            Encoder = Get("HL_H264_ENCODER") ?? defaults.Encoder,
-            HwAccel = Get("HL_HWACCEL") is { } accel && !accel.Equals("none", StringComparison.OrdinalIgnoreCase) ? accel : null,
-            HwAccelDevices = Get("HL_HWACCEL_DEVICES")?.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries) ?? [],
-            HwAccelSkipCodecs = Get("HL_HWACCEL_SKIP_CODECS") is { } skip
-                ? skip.Equals("none", StringComparison.OrdinalIgnoreCase)
-                    ? []
-                    : skip.ToLowerInvariant().Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-                : null,
-            MediaEngine = Get("HL_MEDIA_ENGINE")?.ToLowerInvariant() ?? defaults.MediaEngine,
+            IntelSlots = ParseSlots(Get("HL_HV_INTEL_SLOTS"), "HL_HV_INTEL_SLOTS", parseErrors),
+            NvidiaSlots = ParseSlots(Get("HL_HV_NVIDIA_SLOTS"), "HL_HV_NVIDIA_SLOTS", parseErrors),
+            AppleSlots = ParseSlots(Get("HL_HV_APPLE_SLOTS"), "HL_HV_APPLE_SLOTS", parseErrors),
+            CpuSlots = Get("HL_CPU_SLOTS") is { } cpu
+                ? int.TryParse(cpu, NumberStyles.Integer, CultureInfo.InvariantCulture, out var cpuSlots) && cpuSlots >= 0
+                    ? cpuSlots
+                    : Error(parseErrors, "HL_CPU_SLOTS must be 0 or more.", defaults.CpuSlots)
+                : defaults.CpuSlots,
+            HwSkipCodecs = List(Get("HL_HWACCEL_SKIP_CODECS")?.ToLowerInvariant()),
+            IntelApi = Get("HL_INTEL_API")?.ToLowerInvariant() ?? defaults.IntelApi,
             FfmpegLibs = Get("HL_FFMPEG_LIBS"),
             SpriteSeek = Get("HL_SPRITE_SEEK")?.ToLowerInvariant() ?? defaults.SpriteSeek,
             DecodeThreads = int.TryParse(Get("HL_DECODE_THREADS"), NumberStyles.Integer, CultureInfo.InvariantCulture, out var threads) && threads > 0
@@ -167,14 +182,46 @@ public sealed record WorkerOptions
             SourceCacheMb = int.TryParse(Get("HL_SOURCE_CACHE_MB"), NumberStyles.Integer, CultureInfo.InvariantCulture, out var cache) && cache >= 0
                 ? cache
                 : defaults.SourceCacheMb,
+            BenchCounts = counts.Count > 0 && !counts.Contains(-1) ? counts : defaults.BenchCounts,
+            BenchClips = List(Get("HL_BENCH_CLIPS")?.ToLowerInvariant()) is { Length: > 0 } clips ? clips : defaults.BenchClips,
+            ParseErrors = parseErrors,
         };
     }
 
-    /// <summary>Configuration errors that stop the worker from starting.</summary>
-    public IReadOnlyList<string> Validate()
+    /// <summary>"gpu,slots;gpu,slots" (repeated flags arrive joined with ;); null when not set.</summary>
+    internal static IReadOnlyList<(int Gpu, int Slots)>? ParseSlots(string? value, string name, List<string> errors)
     {
-        var errors = new List<string>();
-        if (ListenUrl is null && CoveUrl is null)
+        if (value is null)
+            return null;
+        var result = new List<(int, int)>();
+        foreach (var entry in value.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var parts = entry.Split(',', StringSplitOptions.TrimEntries);
+            if (parts.Length == 2
+                && int.TryParse(parts[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out var gpu) && gpu >= 0
+                && int.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out var slots) && slots >= 0)
+            {
+                if (result.Any(r => r.Item1 == gpu))
+                    errors.Add($"{name}: GPU {gpu} is given more than once.");
+                result.Add((gpu, slots));
+            }
+            else
+                errors.Add($"{name}: \"{entry}\" is not gpu_idx,slots (e.g. 0,2).");
+        }
+        return result;
+    }
+
+    private static T Error<T>(List<string> errors, string message, T fallback)
+    {
+        errors.Add(message);
+        return fallback;
+    }
+
+    /// <summary>Configuration errors that stop the worker from starting; <paramref name="bench"/> needs no Cove.</summary>
+    public IReadOnlyList<string> Validate(bool bench = false)
+    {
+        var errors = new List<string>(ParseErrors);
+        if (!bench && ListenUrl is null && CoveUrl is null)
             errors.Add("Set HL_LISTEN_URL (Cove connects to the worker) and/or HL_COVE_URL (the worker connects to Cove).");
         if (ListenUrl is not null && !IsHttp(ListenUrl))
             errors.Add("HL_LISTEN_URL must be an http:// or https:// address, e.g. http://0.0.0.0:8750.");
@@ -182,22 +229,13 @@ public sealed record WorkerOptions
             errors.Add("HL_COVE_URL must be Cove's http:// or https:// address, e.g. http://192.168.1.10:5073.");
         if (SpriteSeek is not ("exact" or "keyframe"))
             errors.Add("HL_SPRITE_SEEK must be exact or keyframe.");
-        if (MediaEngine is not ("auto" or "libav" or "cli"))
-            errors.Add("HL_MEDIA_ENGINE must be auto, libav or cli.");
-        if (HwAccelDevices.Count > 0 && HwAccel is null)
-            errors.Add("HL_HWACCEL_DEVICES needs HL_HWACCEL, e.g. HL_HWACCEL=cuda.");
+        if (IntelApi is not ("qsv" or "vaapi"))
+            errors.Add("HL_INTEL_API must be qsv or vaapi.");
+        if (BenchClips.Any(c => c is not ("1080p" or "4k")))
+            errors.Add("HL_BENCH_CLIPS must be 1080p and/or 4k.");
         if (Token is { Length: < Protocol.WorkerTokens.MinLength })
             errors.Add($"HL_WORKER_TOKEN must be at least {Protocol.WorkerTokens.MinLength} characters.");
         return errors;
-    }
-
-    /// <summary>The ffmpeg/ffprobe bundled next to the worker (<c>ffmpeg/</c> on Windows, <c>ffmpeg/bin/</c> on Linux),
-    /// else the one on PATH.</summary>
-    private static string Bundled(string tool)
-    {
-        var name = OperatingSystem.IsWindows() ? tool + ".exe" : tool;
-        var bundled = new[] { Path.Combine(AppContext.BaseDirectory, "ffmpeg", name), Path.Combine(AppContext.BaseDirectory, "ffmpeg", "bin", name) };
-        return bundled.FirstOrDefault(File.Exists) ?? tool;
     }
 
     private static bool IsHttp(string value)

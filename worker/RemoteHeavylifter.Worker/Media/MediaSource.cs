@@ -70,15 +70,4 @@ public sealed record MediaSource(string Url, IReadOnlyList<string> InputOptions,
         }
     }
 
-    /// <summary><c>[..InputOptions, ..DecodeOptions, "-i", Url]</c>, the only way an input is ever added to an ffmpeg
-    /// command line.</summary>
-    internal IEnumerable<string> Input()
-    {
-        foreach (var option in InputOptions)
-            yield return option;
-        foreach (var option in DecodeOptions ?? [])
-            yield return option;
-        yield return "-i";
-        yield return Url;
-    }
 }

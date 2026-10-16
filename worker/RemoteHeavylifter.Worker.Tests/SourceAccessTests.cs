@@ -24,7 +24,8 @@ public sealed class SourceAccessTests : IDisposable
     {
         var options = new WorkerOptions { Token = Token, DataDir = _tmp.Path };
         var cove = new CoveHttpClient(new HttpClient(_cove), WorkerToken.Load(options));
-        _runner = new TaskRunner(options, WorkerToken.Load(options), cove, new SourceCache(0, cove.GetRangeAsync), _engine,
+        _runner = new TaskRunner(options, WorkerToken.Load(options), cove, new SourceCache(0, cove.GetRangeAsync),
+            new SlotPool([new Slot(new SlotPlan(SlotIds.Cpu, SlotKinds.Cpu, null, 2), _engine, "libx264")]),
             NullLogger<TaskRunner>.Instance);
     }
 

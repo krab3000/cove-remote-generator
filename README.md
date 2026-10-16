@@ -16,7 +16,7 @@ It has three parts:
  one WebSocket per worker, JSON-RPC (StreamJsonRpc) ◀────▶ either side may dial:
    worker has a URL  → Cove dials ws(s)://worker:8750/rpc
    no URL            → worker dials wss://cove/api/ext/com.cove.remote-heavylifter/worker/ws
- submit(task)  ────────────────────────────────────────▶ ffmpeg/ffprobe read the source URL directly
+ submit(task)  ────────────────────────────────────────▶ libav reads the source URL (or a mapped file)
  GET/HEAD …/worker/tasks/{task}/source  ◀──────────────── (Range requests, X-Heavylifter-Token header)
  PUT …/worker/tasks/{task}/artifacts/{kind} ◀──────────── upload, size + sha256 checked
  taskFinished  ◀──────────────────────────────────────── 
@@ -62,16 +62,16 @@ It has three parts:
 
 ## Running a worker
 
-### Media engines
+### Media engine
 
-The worker reads and encodes video in one of two ways:
+The worker reads and encodes video with libav only:
 
-- **libav (default).** FFmpeg's libraries run inside the worker process, through the [FFmpeg.AutoGen](https://github.com/Ruslan-B/FFmpeg.AutoGen) 9.0 bindings. Each step opens its video once and keeps one decoder (on the GPU with `HL_HWACCEL`). Between sprite and phash timestamps it decodes on instead of seeking whenever a seek would decode the same GOP again, and frames reach the image code in memory. Seeks, filters, autorotation and encoder settings mirror the command line's.
+- FFmpeg's libraries run inside the worker process, through the [FFmpeg.AutoGen](https://github.com/Ruslan-B/FFmpeg.AutoGen) 9.0 bindings. Each step opens its video once and keeps one decoder (on its slot's GPU for codecs that GPU decodes). Between sprite and phash timestamps it decodes on instead of seeking whenever a seek would decode the same GOP again, and frames reach the image code in memory. Seeks, filters, autorotation and encoder settings mirror Cove's ffmpeg command line.
   - The bindings need exactly FFmpeg 9.0's libraries (avcodec 63, avformat 63, avfilter 12, avutil 61, swscale 10, swresample 7). The Docker image and the standalone packages bundle BtbN's `n9.0` GPL shared build, which includes NVENC, NVDEC/CUDA, QSV and AMF.
-  - Outputs match the command line's closely, not bit for bit: a previewed segment can differ by a frame, and sprite frames skip a JPEG round trip.
-- **Command line (`HL_MEDIA_ENGINE=cli`).** One ffmpeg/ffprobe process per operation, as in earlier versions. The worker falls back to it when the libav libraries are missing or don't match.
+  - Outputs match Cove's ffmpeg command line closely, not bit for bit: a previewed segment can differ by a frame, and sprite frames skip a JPEG round trip.
+- The worker never starts ffmpeg or ffprobe and does not start without these libraries. The tests still run Cove's ffmpeg command lines (from `PATH`) as the reference the libav output is compared with.
 
-A native crash inside libav takes the whole worker down, where a crashing ffmpeg process only failed its task. Run the worker under a restart policy (Docker `--restart unless-stopped`, a service manager), or use `HL_MEDIA_ENGINE=cli` if a library misbehaves on some video.
+A native crash inside libav takes the whole worker down. Run the worker under a restart policy (Docker `--restart unless-stopped`, a service manager), and use `--hwaccel-skip-codecs` for a codec a GPU decoder misbehaves on.
 
 ### Docker
 
@@ -93,7 +93,7 @@ Keep the data volume: it holds the worker's token, which is its identity.
 
 ### Without Docker
 
-The standalone packages below bundle FFmpeg (libraries and executables) in an `ffmpeg` folder next to the worker; on Windows and Linux nothing else is needed. Run from source, or on macOS (BtbN has no macOS build), the worker uses FFmpeg 9.0 shared libraries from `HL_FFMPEG_LIBS` when they match, and otherwise ffmpeg and ffprobe from `PATH` or `HL_FFMPEG` / `HL_FFPROBE`:
+The standalone packages below bundle FFmpeg's libraries in an `ffmpeg` folder next to the worker; on Windows and Linux nothing else is needed. Run from source, or on macOS (BtbN has no macOS build), the worker needs FFmpeg 9.0's shared libraries in `HL_FFMPEG_LIBS` (or where it looks by default); running the tests also needs `ffmpeg` and `ffprobe` on `PATH`:
 
 | OS | Install ffmpeg |
 |---|---|
@@ -103,9 +103,9 @@ The standalone packages below bundle FFmpeg (libraries and executables) in an `f
 
 **macOS.** Homebrew's `ffmpeg` (9.x) works for both engines, with no `HL_FFMPEG_LIBS`. The libav engine finds its shared libraries in `/opt/homebrew/opt/ffmpeg/lib` (Apple Silicon) or `/usr/local/opt/ffmpeg/lib` (Intel), and the build includes Apple's VideoToolbox:
 
-- **Encode previews on the media engine:** `HL_H264_ENCODER=h264_videotoolbox`.
-- **Keep decoding on the CPU:** leave `HL_HWACCEL` unset. On an M1 Pro, a 1080p H.264 source took 9.3 s for all four artifacts with CPU decoding and VideoToolbox encoding, against 9.9 s all on the CPU. With `HL_HWACCEL=videotoolbox` it took 49 s, because the multithreaded CPU decoder is several times faster than VideoToolbox's plus the copy back from GPU memory.
-- **If you enable hardware decoding anyway,** VideoToolbox frames are converted to the software decoder's pixel format and come out byte-identical. Sprites and phashes match Cove's either way; the tests check this.
+- **The worker gets an `apple0` slot pool** that encodes previews with `h264_videotoolbox` and decodes nothing, plus its CPU slots. Cove sends `apple0` previews only, and covers, sprites and phashes to the CPU slots.
+- **Why it doesn't decode on the GPU:** on an M1 Pro, a 1080p H.264 source took 9.3 s for all four artifacts with CPU decoding and VideoToolbox encoding, against 9.9 s all on the CPU, and 49 s with VideoToolbox decoding, because the multithreaded CPU decoder is several times faster than VideoToolbox's plus the copy back from GPU memory.
+- **Slots:** `--hv-apple-slots=0,2` sets how many previews encode at once (default 2), `--cpu-slots` the rest.
 
 To run a worker on an Apple Silicon Mac:
 
@@ -118,12 +118,12 @@ To run a worker on an Apple Silicon Mac:
    ```sh
    HL_COVE_URL=https://cove.example.lan \
    HL_WORKER_NAME=$(scutil --get LocalHostName) \
-   HL_H264_ENCODER=h264_videotoolbox \
+   HL_CPU_SLOTS=4 \
    HL_DATA_DIR="$HOME/.heavylifter" \
    artifacts/worker/osx-arm64/RemoteHeavylifter.Worker
    ```
 
-On startup it should log `Media engine: libav (FFmpeg 9.x) from /opt/homebrew/opt/ffmpeg/lib` and `encoder h264_videotoolbox`.
+On startup it should log `Media engine: libav (FFmpeg 9.x) from /opt/homebrew/opt/ffmpeg/lib` and `Slots apple0 (Apple media engine, videotoolbox): 2 slots, h264_videotoolbox, decodes in software (no GPU decoders)`.
 
 On first start it prints a worker ID and waits until you **Trust** that ID in Cove (Settings → Remote Generation → Pending workers). `HL_DATA_DIR` holds the worker's token, so keep it the same between runs.
 
@@ -131,7 +131,7 @@ If you copy the binary to another Mac, it needs `brew install ffmpeg` there too.
 
 If Cove is served over HTTPS with a private CA, trust that CA in the macOS keychain. If Cove's sign-in is off, add the address's host name to Cove's `Auth.TrustedHosts`, or the worker's requests will make Cove turn sign-in on.
 
-Hardware encoding (`HL_H264_ENCODER=h264_nvenc` and so on) needs an ffmpeg build that includes it. For the libav engine from source, put the shared libraries where the worker looks: `scripts/fetch-ffmpeg.sh win-x64 artifacts/ffmpeg/win-x64` and `HL_FFMPEG_LIBS=artifacts/ffmpeg/win-x64/ffmpeg` (the tests find that folder by themselves).
+Hardware decoding and encoding (VA-API, CUDA/NVDEC, NVENC) need an ffmpeg build that includes them. For the libav engine from source, put the shared libraries where the worker looks: `scripts/fetch-ffmpeg.sh win-x64 artifacts/ffmpeg/win-x64` and `HL_FFMPEG_LIBS=artifacts/ffmpeg/win-x64/ffmpeg` (the tests find that folder by themselves).
 
 **From source** (needs the .NET 10 SDK):
 
@@ -184,18 +184,26 @@ Every setting is an environment variable and a command-line flag named after it 
 | `HL_WORKER_TOKEN` | `--worker-token` | generated | A fixed token, at least 16 characters. Without it, the worker generates one and keeps it in `HL_DATA_DIR/worker.token`. |
 | `HL_WORKER_NAME` | `--worker-name` | host name | Shown in Cove. |
 | `HL_DATA_DIR` | `--data-dir` | `./data` | Token and scratch. A step's scratch files are deleted as soon as that step ends. |
-| `HL_MAX_CONCURRENCY` | `--max-concurrency` | `cpu/4` | Videos generated at once, shared by every Cove connected to the worker. Cove also caps this per worker. |
+| `HL_HV_INTEL_SLOTS` | `--hv-intel-slots` | every detected Intel GPU: 2 | `gpu_idx,slots`: videos at once on that Intel GPU (Quick Sync decode and `h264_qsv` encode on its render node; see `HL_INTEL_API`). Repeat the flag for more GPUs, or `0,2;1,2`; `slots` 0 leaves a GPU out. Once any `--hv-*-slots` is given, only the GPUs listed are used. GPUs are numbered per vendor in PCI order, as the startup log lists them. |
+| `HL_HV_NVIDIA_SLOTS` | `--hv-nvidia-slots` | every detected NVIDIA GPU: 2 | As `--hv-intel-slots`, for NVIDIA GPUs (CUDA/NVDEC decode, `h264_nvenc` encode on the same GPU). |
+| `HL_HV_APPLE_SLOTS` | `--hv-apple-slots` | `0,2` on macOS | As `--hv-intel-slots`, for the Mac's media engine (previews only, see macOS above). |
+| `HL_CPU_SLOTS` | `--cpu-slots` | `1` | Videos at once decoded and encoded in software. Cove sends these videos no GPU decodes, and with "Let CPU slots help" also overflow from busy GPUs. |
+| `HL_INTEL_API` | `--intel-api` | `qsv` | How Intel GPUs decode and encode. `qsv`: Quick Sync, with codecs that have a Quick Sync decoder; VC-1 decodes in software, because FFmpeg's `vc1_qsv` crashes the worker. `vaapi`: VA-API decode (VC-1 included) and `h264_vaapi`. On a UHD 770 (1080p, 2 at once) Quick Sync did 5.5 videos/min at 20% CPU; VA-API kept failing to copy frames off the GPU and fell back to software (3.5 videos/min, 62% CPU). |
 | `HL_SOURCE_CACHE_MB` | `--source-cache-mb` | `1024` | RAM for caching video bytes read from Cove, shared by all running videos. ffmpeg reads each video through a loopback endpoint in the worker, so its many seeks reuse one download of the header and of each byte range. `0` makes ffmpeg read from Cove directly. After each step the log shows the cache's hit rate and how much was read from Cove. |
-| `HL_H264_ENCODER` | `--h264-encoder` | `libx264` | Or `h264_nvenc`, `h264_qsv`, `h264_vaapi`, and so on. If a hardware encode fails, the worker falls back to libx264. |
-| `HL_HWACCEL` | `--hwaccel` | – | Decode videos on the GPU with this ffmpeg hwaccel, for example `cuda` (NVIDIA), `d3d11va`, `qsv` or `vaapi`. With libav, each step keeps one GPU decoder and copies only the frames it uses to memory; `qsv` (Intel Quick Sync, Windows) decodes through the stream's Quick Sync decoder (`h264_qsv`, `hevc_qsv` …) and `HL_HWACCEL_DEVICES` picks the adapter. Quick Sync encoding is `HL_H264_ENCODER=h264_qsv`. An Intel UHD 770 saturates at about 4–8 videos at once (≈8 videos/min for 1080p H.264 with the full pipeline), two RTX cards with `cuda` + `h264_nvenc` did 24.7 at 8. With the command line, every input of the cover, preview, sprite and phash commands gets `-hwaccel`, and frame batches shrink to 6 inputs to save video memory. Decoding that fails on the GPU continues in software. If FFmpeg lacks the hwaccel, the worker decodes in software and logs a warning. On a fast CPU, software decoding of 1080p H.264 can beat the GPU; the GPU pays off for 4K and HEVC, and frees the CPU. VideoToolbox-decoded frames (and so phashes) are byte-identical to software-decoded ones; for other hwaccels, phashes have not been checked against Cove's. |
-| `HL_HWACCEL_DEVICES` | `--hwaccel-devices` | – | Comma-separated hwaccel devices (GPU indexes for `cuda`, for example `0,1`). Tasks take them in turn. |
-| `HL_HWACCEL_SKIP_CODECS` | `--hwaccel-skip-codecs` | `vc1` for `qsv`, else – | Comma-separated codecs (libav names: `vc1`, `mpeg2video`, `hevc` …) decoded in software even with `HL_HWACCEL`; `none` skips nothing. FFmpeg's `vc1_qsv` decoder crashes the worker on VC-1 (WMV) videos, so Quick Sync skips VC-1 by default; VA-API decodes it. With libav, codecs the hwaccel has no decoder for are decoded in software anyway. |
-| `HL_FFMPEG_INPUT_ARGS` | `--ffmpeg-input-args` | – | Extra ffmpeg input options. The command line places them before the cover and preview inputs (they apply only to a command's first input); libav applies them to every source it opens, as demuxer/protocol options. For hardware decoding use `HL_HWACCEL`. |
-| `HL_MEDIA_ENGINE` | `--media-engine` | `auto` | `auto`: libav in-process when its libraries load, else the command line. `libav`: refuse to start without them. `cli`: always the command line. |
+| `HL_HWACCEL_SKIP_CODECS` | `--hwaccel-skip-codecs` | – | Comma-separated codecs (libav names: `vc1`, `mpeg2video`, `hevc` …) decoded in software on every GPU, whatever the GPU reports. |
+| `HL_FFMPEG_INPUT_ARGS` | `--ffmpeg-input-args` | – | Extra demuxer/protocol options for every source, written as ffmpeg input options (`-rw_timeout 30000000`). |
 | `HL_FFMPEG_LIBS` | `--ffmpeg-libs` | bundled | Directory with the FFmpeg 9.0 shared libraries. By default the bundled `ffmpeg` folder (`ffmpeg/lib` on Linux), then `/opt/ffmpeg/lib`, then on macOS Homebrew's `/opt/homebrew/opt/ffmpeg/lib` and `/usr/local/opt/ffmpeg/lib`. |
 | `HL_SPRITE_SEEK` | `--sprite-seek` | `exact` | How sprite frames are found. `exact`: the frame at each timestamp, as Cove does. `keyframe`: the keyframe at or before it (`-noaccurate_seek -skip_frame nokey` on the command line); only keyframes are decoded, so sprites of long-GOP or 4K videos are many times faster (a 4K HEVC film: 14 s → 0.6 s per sprite with 8 videos at once), and a thumbnail can be up to one GOP (a few seconds) earlier than its time slot. The cover and phash always seek exactly. |
-| `HL_DECODE_THREADS` | `--decode-threads` | auto | Decoder threads per video with libav. By default a video's share of the CPU (cores ÷ `HL_MAX_CONCURRENCY`, at most 16) for cover, sprite and phash frames, and libav's own choice for previews. |
-| `HL_FFMPEG`, `HL_FFPROBE` | `--ffmpeg`, `--ffprobe` | bundled, else `ffmpeg`, `ffprobe` | Paths to the binaries the command line engine runs. |
+| `HL_DECODE_THREADS` | `--decode-threads` | auto | Decoder threads per video with libav. By default a video's share of the CPU (cores ÷ all slots, at most 16) for cover, sprite and phash frames, and libav's own choice for previews. |
+
+GPU slots: at startup the worker finds its GPUs (Linux: Intel through VA-API on its render node, run with Quick Sync by default, NVIDIA through CUDA/NVDEC; macOS: the media engine; Windows: not yet, CPU slots only) and what each decodes, and logs one line per slot pool, e.g. `Slots nvidia0 (NVIDIA GeForce GTX 1660 Ti, cuda 0, 1 video engine): 2 slots, h264_nvenc@0, decodes h264 hevc …`. Cove treats the slots of all workers as one pool:
+
+- A video some GPU decodes (by its codec and size) runs whole on a GPU slot that decodes it.
+- A video no GPU decodes (WMV2, Xvid …) is split: its preview goes to a GPU slot (decoded in software, encoded on the GPU), its cover, sprite and phash to a CPU slot.
+- Each slot takes the oldest task it may run as soon as it is free, so every slot stays busy while there is work for it; a codec only one GPU decodes waits for that GPU.
+- **Let CPU slots help** (Remote Generation settings): when every GPU slot is busy, an idle CPU slot does a waiting video's cover, sprite and phash; its preview stays on a GPU.
+
+`bench` measures each slot pool and suggests slots: `RemoteHeavylifter.Worker bench [--bench-counts 1,2,3,4] [--bench-clips 1080p,4k]` downloads Big Buck Bunny into `HL_DATA_DIR/bench` once, runs the full pipeline with 1, 2, 3 … videos at once on every GPU and the CPU, and prints videos/min, seconds per video and CPU use, then the fewest videos at once reaching 90% of each pool's best, as flags to paste (e.g. `--hv-nvidia-slots=0,2 --cpu-slots=2`).
 
 Reading sources directly: a worker that sees Cove's video folders on its own disk (on the same machine as Cove, or through a network share) can read source videos from there instead of over HTTP. In Cove, under the worker's settings, choose **Source videos → Directly from the worker's disk** and map each Cove folder (as Cove stores the path, for example `/media` inside Cove's container) to the same folder on the worker (for example `/srv/media`). Cove then sends each task the worker's path. A video outside the mapped folders, or one the worker cannot open at the mapped path, is read over HTTP (the worker logs a warning), and **Test** reports which way the sample video was read. Uploads always go over HTTP, and the RAM source cache is used only for HTTP reads.
 
@@ -225,7 +233,7 @@ This produces `artifacts/remote-heavylifter-<version>.zip`. Install it in Cove f
 
 During a run:
 
-- Each worker works on up to *min(its max parallel videos, its reported capacity)* videos at once.
+- Each slot pool of each worker (a GPU, or the CPU) works on up to the number of slots the worker reports for it; Cove routes each video to a slot that can run it (see "GPU slots" above).
 - A worker that disconnects, or keeps failing, is taken out of the run. Its videos move to the other workers, and it rejoins when it reconnects.
 - Cancelling the job cancels the in-flight tasks and revokes their access.
 
@@ -251,4 +259,3 @@ The extension builds against the published Cove.Sdk NuGet package by default; pa
 - **No shared lock with Cove.** Cove's per-video generation lock is not available to extensions. Don't run Cove's own Generate task over the same videos at the same time. Commits are atomic renames, but the last writer wins.
 - **Out of scope:** segment thumbnails and previews, stereo VR cards and previews, and MD5 checksums.
 - **Worker tokens** of workers Cove dials are stored in Cove's extension data table. They are never returned to the browser, but they are not encrypted at rest. Workers that dial in are stored as a hash only.
-- **Tokens on the worker's command line.** ffmpeg receives the worker token as a `-headers` argument, so it is visible in the worker machine's process list.

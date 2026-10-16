@@ -23,7 +23,7 @@ public sealed class VideoToolboxTests(ClipFixture clips) : IClassFixture<ClipFix
         LibavEngines.Require();
         Assert.SkipUnless(OperatingSystem.IsMacOS() && LibavLoader.SupportsHwAccel("videotoolbox"), "no VideoToolbox");
         LibavLoader.TryLoad(null, out var info, out _);
-        return new LibavMediaEngine(info!, new LibavEngineOptions(null, 1, encoder, []), Engines.Cli, _log);
+        return new LibavMediaEngine(info!, new LibavEngineOptions(null, 1, encoder, []), _log);
     }
 
     private void AssertNoFallback() => _log.AssertNoFallback();

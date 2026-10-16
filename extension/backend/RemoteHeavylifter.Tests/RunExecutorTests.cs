@@ -17,7 +17,11 @@ internal sealed class FakeWorker(string name, WorkerAccess access, int capacity 
 {
     public Guid WorkerId { get; } = Guid.NewGuid();
     public string Name { get; } = name;
-    public WorkerInfo Info => new(ProtocolInfo.Version, "test", Name, "ffmpeg test", "libx264", capacity, InFlight);
+
+    /// <summary>The slot pools it reports; default one CPU pool.</summary>
+    public IReadOnlyList<SlotInfo> Slots { get; set; } = [FakeSlots.Cpu(capacity)];
+
+    public WorkerInfo Info => new("test", Name, "ffmpeg test", Slots);
     public string? InboundBaseUrl => null;
     public bool IsOpen => !Down;
 
@@ -38,6 +42,13 @@ internal sealed class FakeWorker(string name, WorkerAccess access, int capacity 
     public bool Hang { get; set; }
     public bool CorruptUploads { get; set; }
 
+    /// <summary>How long a task on a slot takes.</summary>
+    public Func<string?, TimeSpan> Delay { get; set; } = _ => TimeSpan.Zero;
+
+    /// <summary>Tasks running per slot now, and the most ever at once.</summary>
+    public readonly ConcurrentDictionary<string, int> SlotInFlight = new();
+    public readonly ConcurrentDictionary<string, int> SlotMaxInFlight = new();
+
     public static string Content(string kind, int videoId) => $"{kind}-{videoId}";
 
     public static string Phash(int videoId) => $"abc{videoId:x}";
@@ -57,6 +68,9 @@ internal sealed class FakeWorker(string name, WorkerAccess access, int capacity 
         while (now > (max = Volatile.Read(ref MaxInFlight)) && Interlocked.CompareExchange(ref MaxInFlight, now, max) != max)
         {
         }
+        var slot = request.SlotId ?? "?";
+        var onSlot = SlotInFlight.AddOrUpdate(slot, 1, (_, n) => n + 1);
+        SlotMaxInFlight.AddOrUpdate(slot, onSlot, (_, n) => Math.Max(n, onSlot));
 
         try
         {
@@ -73,6 +87,8 @@ internal sealed class FakeWorker(string name, WorkerAccess access, int capacity 
                 }
             }
             await Task.Yield();
+            if (Delay(request.SlotId) is { } delay && delay > TimeSpan.Zero)
+                await Task.Delay(delay, ct);
             progress?.Invoke(new TaskProgress(request.TaskId, 0.5, "encoding"));
 
             var (status, code, failed) = Behavior(request);
@@ -104,12 +120,22 @@ internal sealed class FakeWorker(string name, WorkerAccess access, int capacity 
         finally
         {
             Interlocked.Decrement(ref InFlight);
+            SlotInFlight.AddOrUpdate(slot, 0, (_, n) => n - 1);
         }
     }
 
     public Task<ProbeResult> ProbeAsync(ProbeParams request, CancellationToken ct) => Task.FromResult(new ProbeResult(true, 1, null));
 
     public Task<WorkerInfo> RefreshInfoAsync(CancellationToken ct) => Task.FromResult(Info);
+}
+
+internal static class FakeSlots
+{
+    public static SlotInfo Cpu(int capacity) => new("cpu", SlotKinds.Cpu, null, "CPU", capacity, 0, "libx264", []);
+
+    public static SlotInfo Gpu(string id, int capacity, params string[] codecs) => new(
+        id, SlotKinds.Gpu, id.StartsWith("intel", StringComparison.Ordinal) ? "intel" : "nvidia", id, capacity, 0, "h264_nvenc",
+        codecs.Select(c => new DecoderCap(c, 4096, 4096)).ToList());
 }
 
 internal sealed class RecordingFingerprints : IFingerprintStore
@@ -202,19 +228,44 @@ public sealed class RunExecutorTests : IDisposable
         })
         .ToList();
 
-    private async Task<(RecordingProgress Progress, RunCounters Counters, IReadOnlyDictionary<string, int> PerWorker)> RunAsync(
+    /// <summary>Workers with one CPU pool of <c>Slots</c>.</summary>
+    private Task<(RecordingProgress Progress, RunCounters Counters, IReadOnlyDictionary<string, int> PerSlot)> RunAsync(
         IReadOnlyList<WorkItem> items, bool overwrite, CancellationToken ct, params (FakeWorker Worker, int Slots)[] workers)
     {
-        var executor = new RunExecutor(new FakeDirectory(workers.Select(w => w.Worker).ToArray()), _access, _fingerprints, "ext.test",
+        foreach (var (worker, slots) in workers)
+            worker.Slots = [FakeSlots.Cpu(slots)];
+        return RunPoolAsync(items, overwrite, false, ct, workers.Select(w => w.Worker).ToArray());
+    }
+
+    /// <summary>Workers with the slot pools they report.</summary>
+    private async Task<(RecordingProgress Progress, RunCounters Counters, IReadOnlyDictionary<string, int> PerSlot)> RunPoolAsync(
+        IReadOnlyList<WorkItem> items, bool overwrite, bool cpuHelpsGpu, CancellationToken ct, params FakeWorker[] workers)
+    {
+        var executor = new RunExecutor(new FakeDirectory(workers), _access, _fingerprints, "ext.test",
             Fast, TimeProvider.System, NullLogger.Instance);
         var progress = new RecordingProgress();
         var counters = new RunCounters { Total = items.Count };
-        var run = new RunContext("run1", _paths, new PreviewSettings(12, 0.75, "0", "0", "slow", false), overwrite);
-        var perWorker = await executor.ExecuteAsync(
-            workers.Select(w => new LiveWorker(w.Worker.WorkerId, w.Worker.Name, w.Slots, $"http://cove-for-{w.Worker.Name}:5073", _direct)).ToList(),
+        var run = new RunContext("run1", _paths, new PreviewSettings(12, 0.75, "0", "0", "slow", false), overwrite, cpuHelpsGpu);
+        var perSlot = await executor.ExecuteAsync(
+            workers.Select(w => new LiveWorker(w.WorkerId, w.Name, w.Slots, $"http://cove-for-{w.Name}:5073", _direct)).ToList(),
             items, run, progress, counters, ct);
-        return (progress, counters, perWorker);
+        return (progress, counters, perSlot);
     }
+
+    private static List<WorkItem> Videos(int count, string? codec, bool phash = true) => Items(count)
+        .Select(i => new WorkItem
+        {
+            VideoId = i.VideoId, Label = i.Label, CovePath = i.CovePath, SourcePath = i.SourcePath, FileId = i.FileId,
+            SourceSize = i.SourceSize, Duration = i.Duration, Cover = true, Preview = true, Sprite = true, Phash = phash,
+            PreviewScale = i.PreviewScale, Codec = codec, Width = 1920, Height = 1080,
+        })
+        .ToList();
+
+    /// <summary>What each request asked for: its slot and steps.</summary>
+    private static List<(string? Slot, bool Cover, bool Preview, bool Sprite, bool Phash)> Asked(params FakeWorker[] workers) =>
+        workers.SelectMany(w => w.Requests)
+            .Select(r => (r.SlotId, r.Cover is not null, r.Preview is not null, r.Sprite is not null, r.Phash is not null))
+            .ToList();
 
     private void AssertCommitted(int id)
     {
@@ -235,7 +286,7 @@ public sealed class RunExecutorTests : IDisposable
         Assert.All(progress.Units.Values, u => Assert.Equal(JobUnitOutcome.Succeeded, u.Outcome));
         Assert.InRange(a.MaxInFlight, 1, 2);
         Assert.InRange(b.MaxInFlight, 1, 3);
-        Assert.Equal(40, perWorker["a"] + perWorker["b"]);
+        Assert.Equal(40, perWorker["cpu@a"] + perWorker["cpu@b"]);
         for (var id = 1; id <= 40; id++)
             AssertCommitted(id);
         Assert.False(Directory.Exists(Path.Combine(_paths.TempRoot, "run1", "1", "a1")));
@@ -283,7 +334,7 @@ public sealed class RunExecutorTests : IDisposable
         var (_, counters, perWorker) = await RunAsync(Items(20), false, TestContext.Current.CancellationToken, (a, 2), (b, 2));
 
         Assert.Equal(20, counters.Succeeded);
-        Assert.True(perWorker["b"] >= 17);
+        Assert.True(perWorker["cpu@b"] >= 17);
         for (var id = 1; id <= 20; id++)
             AssertCommitted(id);
     }
@@ -309,7 +360,7 @@ public sealed class RunExecutorTests : IDisposable
         var (_, counters, perWorker) = await RunAsync(Items(6), false, TestContext.Current.CancellationToken, (a, 1), (b, 1));
 
         Assert.Equal(6, counters.Succeeded);
-        Assert.Equal(6, perWorker["b"]);
+        Assert.Equal(6, perWorker["cpu@b"]);
     }
 
     [Fact]
@@ -321,7 +372,7 @@ public sealed class RunExecutorTests : IDisposable
 
         Assert.Equal(2, counters.Failed);
         Assert.Equal(2, a.Submitted);
-        Assert.All(progress.Units.Values, u => Assert.StartsWith("a: error", u.Message));
+        Assert.All(progress.Units.Values, u => Assert.StartsWith("cpu@a: error", u.Message));
     }
 
     [Fact]
@@ -458,5 +509,99 @@ public sealed class RunExecutorTests : IDisposable
         Assert.Contains("phash failed (phash broke)", progress.Units["1"].Message);
         Assert.True(File.Exists(_paths.Cover(1)));
         Assert.Empty(_fingerprints.Phashes);
+    }
+
+    // ---- slot pool routing ------------------------------------------------------------------
+
+    [Fact]
+    public async Task Decodable_videos_run_whole_on_a_gpu_that_decodes_them()
+    {
+        var a = Worker("a");
+        a.Slots = [FakeSlots.Gpu("nvidia0", 2, "h264"), FakeSlots.Gpu("intel0", 2, "hevc"), FakeSlots.Cpu(2)];
+        var (_, counters, perSlot) = await RunPoolAsync(Videos(12, "h264"), false, false, TestContext.Current.CancellationToken, a);
+
+        Assert.Equal(12, counters.Succeeded);
+        Assert.All(Asked(a), r => Assert.Equal(("nvidia0", true, true, true, true), r));
+        Assert.Equal(12, perSlot["nvidia0@a"]);
+        Assert.InRange(a.SlotMaxInFlight["nvidia0"], 1, 2);
+        for (var id = 1; id <= 12; id++)
+            AssertCommitted(id);
+    }
+
+    [Fact]
+    public async Task Undecodable_videos_split_preview_to_gpu_rest_to_cpu()
+    {
+        var a = Worker("a");
+        var b = Worker("b");
+        a.Slots = [FakeSlots.Gpu("nvidia0", 2, "h264")];
+        b.Slots = [FakeSlots.Cpu(3)];
+        var (progress, counters, _) = await RunPoolAsync(Videos(10, "wmv2"), false, false, TestContext.Current.CancellationToken, a, b);
+
+        Assert.Equal(10, counters.Succeeded);
+        Assert.All(progress.Units.Values, u => Assert.Equal(JobUnitOutcome.Succeeded, u.Outcome)); // each video completed once
+        Assert.Equal(10, a.Requests.Count);
+        Assert.All(Asked(a), r => Assert.Equal(("nvidia0", false, true, false, false), r));
+        Assert.Equal(10, b.Requests.Count);
+        Assert.All(Asked(b), r => Assert.Equal(("cpu", true, false, true, true), r));
+        Assert.InRange(b.SlotMaxInFlight["cpu"], 1, 3);
+        for (var id = 1; id <= 10; id++)
+        {
+            AssertCommitted(id);
+            Assert.Equal(FakeWorker.Phash(id), _fingerprints.Phashes[100 + id]);
+        }
+    }
+
+    [Fact]
+    public async Task Without_gpus_everything_runs_on_cpu_and_without_cpus_on_gpus()
+    {
+        var cpuOnly = Worker("c");
+        cpuOnly.Slots = [FakeSlots.Cpu(2)];
+        await RunPoolAsync(Videos(4, "wmv2"), false, false, TestContext.Current.CancellationToken, cpuOnly);
+        Assert.All(Asked(cpuOnly), r => Assert.Equal(("cpu", true, true, true, true), r));
+
+        var gpuOnly = Worker("g");
+        gpuOnly.Slots = [FakeSlots.Gpu("nvidia0", 2, "h264")];
+        var (_, counters, _) = await RunPoolAsync(Videos(4, "wmv2"), true, false, TestContext.Current.CancellationToken, gpuOnly);
+        Assert.Equal(4, counters.Succeeded);
+        Assert.All(Asked(gpuOnly), r => Assert.Equal(("nvidia0", true, true, true, true), r));
+    }
+
+    [Fact]
+    public async Task Cpu_slots_help_gpus_only_when_allowed()
+    {
+        var a = Worker("a");
+        a.Slots = [FakeSlots.Gpu("nvidia0", 1, "h264"), FakeSlots.Cpu(2)];
+        a.Delay = slot => slot == "nvidia0" ? TimeSpan.FromMilliseconds(30) : TimeSpan.Zero;
+
+        await RunPoolAsync(Videos(10, "h264"), false, false, TestContext.Current.CancellationToken, a);
+        Assert.DoesNotContain(Asked(a), r => r.Slot == "cpu");
+
+        var b = Worker("b");
+        b.Slots = a.Slots;
+        b.Delay = a.Delay;
+        var (progress, counters, _) = await RunPoolAsync(Videos(10, "h264"), true, true, TestContext.Current.CancellationToken, b);
+        Assert.Equal(10, counters.Succeeded);
+        Assert.All(progress.Units.Values, u => Assert.Equal(JobUnitOutcome.Succeeded, u.Outcome));
+        var helped = Asked(b).Where(r => r.Slot == "cpu").ToList();
+        Assert.NotEmpty(helped);
+        // The CPU never encodes a preview: a video it helped with has its preview done on the GPU.
+        Assert.All(helped, r => Assert.Equal(("cpu", true, false, true, true), r));
+        Assert.Equal(helped.Count, Asked(b).Count(r => r is { Slot: "nvidia0", Preview: true, Cover: false }));
+        for (var id = 1; id <= 10; id++)
+            AssertCommitted(id);
+    }
+
+    [Fact]
+    public async Task Work_only_a_dead_workers_gpu_decoded_goes_to_other_gpus()
+    {
+        var a = Worker("a");
+        var b = Worker("b");
+        a.Slots = [FakeSlots.Gpu("intel0", 1, "av1")];
+        b.Slots = [FakeSlots.Gpu("nvidia0", 1, "h264")];
+        a.Down = true;
+        var (_, counters, _) = await RunPoolAsync(Videos(3, "av1"), false, false, TestContext.Current.CancellationToken, a, b);
+
+        Assert.Equal(3, counters.Succeeded);
+        Assert.All(Asked(b), r => Assert.Equal("nvidia0", r.Slot));
     }
 }

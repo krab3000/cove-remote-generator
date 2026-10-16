@@ -1,6 +1,6 @@
 import type { ButtonHTMLAttributes, ReactNode } from "react";
 import { ChevronDown, ChevronUp, Loader2, PlayCircle } from "lucide-react";
-import type { WorkerHealth, WorkerState } from "./api";
+import type { SlotInfo, WorkerHealth, WorkerState } from "./api";
 
 // Class names are copied from Cove's own settings primitives so the host stylesheet already has them.
 
@@ -151,7 +151,6 @@ const STATE_COLORS: Record<WorkerState, string> = {
   live: "#22c55e",
   offline: "#ef4444",
   unauthorized: "#f59e0b",
-  incompatible: "#f59e0b",
   disabled: "#6b7280",
   waiting: "#6b7280",
 };
@@ -160,7 +159,6 @@ const STATE_LABELS: Record<WorkerState, string> = {
   live: "Live",
   offline: "Offline",
   unauthorized: "Token rejected",
-  incompatible: "Incompatible",
   disabled: "Disabled",
   waiting: "Waiting for worker",
 };
@@ -180,9 +178,14 @@ export function StateBadge({ health }: { health?: WorkerHealth }) {
   );
 }
 
+/** "intel0 1/2 · nvidia0 2/2 · cpu 0/1": each slot pool's busy slots. */
 export function describeLoad(health?: WorkerHealth): string | null {
-  if (!health?.live) return null;
-  const parts = [`${health.running ?? 0}/${health.capacity ?? "?"} busy`];
-  if (health.encoder) parts.push(health.encoder);
-  return parts.join(" · ");
+  if (!health?.live || !health.slots?.length) return null;
+  return health.slots.map((slot) => `${slot.id} ${slot.running}/${slot.capacity}`).join(" · ");
+}
+
+/** What a slot pool is and decodes, for a tooltip. */
+export function describeSlot(slot: SlotInfo): string {
+  const decodes = slot.kind === "gpu" ? (slot.decoders.length ? slot.decoders.map((d) => d.codec).join(", ") : "nothing (software)") : "in software";
+  return `${slot.name}: ${slot.capacity} at once, encodes with ${slot.encoder}, decodes ${decodes}`;
 }

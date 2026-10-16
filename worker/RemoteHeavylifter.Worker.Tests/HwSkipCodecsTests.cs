@@ -9,14 +9,12 @@ namespace RemoteHeavylifter.Worker.Tests;
 public sealed class HwSkipCodecsTests(ClipFixture clips) : IClassFixture<ClipFixture>
 {
     [Fact]
-    public void Quick_sync_skips_vc1_unless_told_otherwise()
+    public void Skip_list_from_the_flag()
     {
         WorkerOptions Load(params string[] args) => WorkerOptions.Load(args, _ => null).Options;
 
-        Assert.Equal(["vc1"], Load("--hwaccel", "qsv").HwSkipCodecs);
-        Assert.Empty(Load("--hwaccel", "vaapi").HwSkipCodecs);
-        Assert.Equal(["vc1", "mpeg2video"], Load("--hwaccel", "vaapi", "--hwaccel-skip-codecs", "VC1, mpeg2video").HwSkipCodecs);
-        Assert.Empty(Load("--hwaccel", "qsv", "--hwaccel-skip-codecs", "none").HwSkipCodecs);
+        Assert.Empty(Load().HwSkipCodecs);
+        Assert.Equal(["vc1", "mpeg2video"], Load("--hwaccel-skip-codecs", "VC1, mpeg2video").HwSkipCodecs);
     }
 
     [Fact]
@@ -31,5 +29,8 @@ public sealed class HwSkipCodecsTests(ClipFixture clips) : IClassFixture<ClipFix
         Assert.Throws<HardwareDecodeException>(() => LibavInput.Open(source, new DecodeSettings(1, false), interrupt, NullLogger.Instance, "test"));
         using var input = LibavInput.Open(source, new DecodeSettings(1, false, HwSkipCodecs: ["h264"]), interrupt, NullLogger.Instance, "test");
         Assert.False(input.OnGpu);
+        // A slot's GPU decodes only the codecs it reports.
+        using var notListed = LibavInput.Open(source, new DecodeSettings(1, false, HwCodecs: ["hevc"]), interrupt, NullLogger.Instance, "test");
+        Assert.False(notListed.OnGpu);
     }
 }

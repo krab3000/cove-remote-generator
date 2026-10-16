@@ -47,7 +47,7 @@ internal static class LibavEngines
     {
         var dir = Environment.GetEnvironmentVariable("HL_FFMPEG_LIBS") ?? FindBundled();
         return LibavLoader.TryLoad(dir, out var info, out var reason)
-            ? (new LibavMediaEngine(info!, new LibavEngineOptions(null, 1, "libx264", []), Engines.Cli), "")
+            ? (new LibavMediaEngine(info!, new LibavEngineOptions(null, 1, "libx264", [])), "")
             : (null, reason);
     });
 
@@ -62,7 +62,7 @@ internal static class LibavEngines
     {
         Require();
         LibavLoader.TryLoad(null, out var info, out _);
-        return new LibavMediaEngine(info!, new LibavEngineOptions(null, 1, encoder, []), Engines.Cli);
+        return new LibavMediaEngine(info!, new LibavEngineOptions(null, 1, encoder, []));
     }
 
     private static string? FindBundled()

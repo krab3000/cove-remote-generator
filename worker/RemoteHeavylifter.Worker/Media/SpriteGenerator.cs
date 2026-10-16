@@ -13,42 +13,6 @@ public static class SpriteGenerator
     internal static string FramePath(string frameDir, int index) =>
         Path.Combine(frameDir, string.Create(CultureInfo.InvariantCulture, $"frame_{index:D4}.jpg"));
 
-    /// <summary>Command-line characters one more frame costs; the per-input options repeat for every frame.</summary>
-    internal static int PerFrameArgLength(MediaSource source, string frameDir, int count, int scaleWidth, string? preFilter)
-    {
-        var last = FramePath(frameDir, Math.Max(0, count - 1));
-        var sourceLength = source.Url.Length + source.InputOptions.Concat(source.DecodeOptions ?? []).Sum(o => o.Length + 1);
-        var length = sourceLength + 28 + last.Length + 72 + (scaleWidth > 0 ? 22 : 0);
-        return length + (preFilter is not null ? preFilter.Length + 1 : 0);
-    }
-
-    internal static List<string> SpriteBatchArgs(
-        MediaSource source, string frameDir, IReadOnlyList<double> timestamps, int start, int count, int scaleWidth, string? preFilter,
-        bool keyframes = false)
-    {
-        List<string> args = ["-v", "error", "-y"];
-        for (var offset = 0; offset < count; offset++)
-        {
-            var seconds = Math.Max(0.0, timestamps[start + offset]);
-            args.AddRange(["-threads", "1"]);
-            // Fast seek: the keyframe the seek lands on, and the decoder skips everything else.
-            if (keyframes)
-                args.AddRange(["-noaccurate_seek", "-skip_frame", "nokey"]);
-            args.AddRange(["-ss", Timing.Fixed(seconds, 3), .. source.Input()]);
-        }
-        var filters = new[] { preFilter, scaleWidth > 0 ? string.Create(CultureInfo.InvariantCulture, $"scale={scaleWidth}:-2") : null }
-            .Where(f => !string.IsNullOrEmpty(f))
-            .ToList();
-        for (var offset = 0; offset < count; offset++)
-        {
-            args.AddRange(["-map", string.Create(CultureInfo.InvariantCulture, $"{offset}:v:0"), "-an", "-frames:v", "1"]);
-            if (filters.Count > 0)
-                args.AddRange(["-vf", string.Join(",", filters)]);
-            args.AddRange(["-threads", "1", "-q:v", "3", "-pix_fmt", "yuvj420p", FramePath(frameDir, start + offset)]);
-        }
-        return args;
-    }
-
     public static async Task GenerateAsync(
         IMediaEngine engine, MediaSource src, double duration, SpriteSpec spec, string workDir, string spriteOutput, string vttOutput,
         CancellationToken ct, bool keyframes = false)

@@ -3,9 +3,6 @@ namespace RemoteHeavylifter.Protocol;
 /// <summary>Wire-level constants shared by the Cove extension and the worker.</summary>
 public static class ProtocolInfo
 {
-    /// <summary>Bumped on any incompatible change to the RPC methods or DTOs.</summary>
-    public const int Version = 2;
-
     /// <summary>Carries the worker token on the WebSocket upgrade and on every worker HTTP request.
     /// Deliberately not <c>Authorization: Bearer</c>: Cove's JWT and API-token handlers would try to parse it.</summary>
     public const string TokenHeader = "X-Heavylifter-Token";
@@ -50,7 +47,6 @@ public static class CloseReasons
     public const string PendingApproval = "pending-approval";
     public const string DuplicateSession = "duplicate-session";
     public const string Unauthorized = "unauthorized";
-    public const string Incompatible = "incompatible";
     public const string Removed = "removed";
     public const string ShuttingDown = "shutting-down";
 }
@@ -59,7 +55,6 @@ public static class CloseReasons
 public static class RpcErrorCodes
 {
     public const int Busy = -32010;
-    public const int Incompatible = -32011;
     public const int UnknownTask = -32012;
 }
 
@@ -74,7 +69,6 @@ public static class ErrorCodes
     public const string Busy = "busy";
     public const string SourceUnreachable = "source_unreachable";
     public const string GenerationFailed = "generation_failed";
-    public const string Incompatible = "incompatible";
     public const string Internal = "internal_error";
 }
 
@@ -106,16 +100,37 @@ public static class ArtifactStates
     public const string Failed = "failed";
 }
 
-public sealed record HelloParams(int ProtocolVersion, string CoveBaseUrl);
+public sealed record HelloParams(string CoveBaseUrl);
 
-public sealed record WorkerInfo(
-    int ProtocolVersion,
-    string WorkerVersion,
-    string? Name,
-    string? FfmpegVersion,
-    string Encoder,
-    int Capacity,
-    int Running);
+/// <param name="Slots">What the worker runs videos on: a slot pool per GPU and one for the CPU.</param>
+public sealed record WorkerInfo(string WorkerVersion, string? Name, string? FfmpegVersion, IReadOnlyList<SlotInfo> Slots);
+
+public static class SlotKinds
+{
+    /// <summary>Decodes on its GPU the codecs in <see cref="SlotInfo.Decoders"/> (others in software) and encodes
+    /// previews on it.</summary>
+    public const string Gpu = "gpu";
+
+    /// <summary>Decodes and encodes in software.</summary>
+    public const string Cpu = "cpu";
+}
+
+/// <summary>A pool of slots on one worker: one GPU (or the CPU), running up to <paramref name="Capacity"/> videos at once.</summary>
+/// <param name="Id">Stable and unique on the worker: intel0, nvidia1, cpu.</param>
+/// <param name="Vendor">intel or nvidia for a GPU; null for the CPU.</param>
+/// <param name="Encoder">The preview encoder (h264_vaapi, h264_nvenc, libx264).</param>
+/// <param name="Decoders">Codecs the GPU decodes (empty for the CPU).</param>
+public sealed record SlotInfo(
+    string Id, string Kind, string? Vendor, string Name, int Capacity, int Running, string Encoder, IReadOnlyList<DecoderCap> Decoders)
+{
+    /// <summary>Whether this slot's GPU decodes <paramref name="codec"/> (a libav name) at this size; unknown sizes (0) fit.</summary>
+    public bool Decodes(string? codec, int width, int height) => Decoders.Any(d =>
+        string.Equals(d.Codec, codec, StringComparison.OrdinalIgnoreCase)
+        && (width <= 0 || width <= d.MaxWidth) && (height <= 0 || height <= d.MaxHeight));
+}
+
+/// <summary>A codec a GPU decodes, by its libav name (h264, hevc, vp9, av1, mpeg2video, vc1 …), up to a size.</summary>
+public sealed record DecoderCap(string Codec, int MaxWidth, int MaxHeight);
 
 public sealed record CoverSpec(double? SeekSeconds, string? Filter, bool FallbackWithoutFilter = true);
 
@@ -140,6 +155,7 @@ public sealed record SpriteSpec(int MaxFrames, int FrameWidth, string? PreFilter
 public sealed record PhashSpec(int FrameCount = 25, int FrameWidth = 160);
 
 /// <summary>One video to generate. URLs are absolute; the worker sends its token with every request to them.</summary>
+/// <param name="SlotId">The <see cref="SlotInfo.Id"/> to run on; null runs on any slot with room.</param>
 /// <param name="SourcePath">The source as a path on the worker's own filesystem, for a worker set to read sources
 /// directly; the worker falls back to <paramref name="SourceUrl"/> when it cannot read it. Null reads over HTTP.</param>
 public sealed record TaskRequest(
@@ -153,7 +169,8 @@ public sealed record TaskRequest(
     PreviewSpec? Preview,
     SpriteSpec? Sprite,
     PhashSpec? Phash = null,
-    string? SourcePath = null);
+    string? SourcePath = null,
+    string? SlotId = null);
 
 public sealed record TaskProgress(string TaskId, double Progress, string? Stage);
 

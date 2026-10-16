@@ -47,7 +47,7 @@ public sealed class VaapiTests(ClipFixture clips) : IClassFixture<ClipFixture>, 
         RequireVaapi();
         Assert.SkipUnless(LibavLoader.SupportsHwAccel(accel) && LibavLoader.HasEncoder(encoder), $"libav has no {accel}");
         LibavLoader.TryLoad(null, out var info, out _);
-        var engine = new LibavMediaEngine(info!, new LibavEngineOptions(null, 1, encoder, []), Engines.Cli, _log);
+        var engine = new LibavMediaEngine(info!, new LibavEngineOptions(null, 1, encoder, []), _log);
         var source = Specs.Local(clips.Clip30);
         if (hardwareDecode)
             source = source.WithHardwareDecode(accel, null);
@@ -55,6 +55,22 @@ public sealed class VaapiTests(ClipFixture clips) : IClassFixture<ClipFixture>, 
         var stream = Ffmpeg.ProbeStream(_tmp["p.mp4"]);
         Assert.Equal((640, 360), (stream.Width, stream.Height));
         Assert.Equal(12 * 0.75, stream.Duration, 0.3);
+        _log.AssertNoFallback();
+    }
+
+    /// <summary>A Quick Sync slot decodes and encodes on its own GPU's render node (found as the worker finds it).</summary>
+    [Fact]
+    public async Task Quick_sync_runs_on_the_intel_gpus_render_node()
+    {
+        RequireVaapi();
+        Assert.SkipUnless(LibavLoader.SupportsHwAccel("qsv") && LibavLoader.HasEncoder("h264_qsv"), "libav has no qsv");
+        var node = Hardware.LinuxGpuDetector.RenderNodes("/sys/class/drm").FirstOrDefault(n => n.Vendor == "0x8086");
+        Assert.SkipWhen(node is null, "no Intel GPU");
+        LibavLoader.TryLoad(null, out var info, out _);
+        var engine = new LibavMediaEngine(info!, new LibavEngineOptions(null, 1, $"h264_qsv@{node!.Path}", [], null, ["h264"]), _log);
+        await PreviewGenerator.GenerateAsync(engine, Specs.Local(clips.Clip30).WithHardwareDecode("qsv", node.Path), 30, Specs.Preview(),
+            _tmp["p"], _tmp["p.mp4"], Ct);
+        Assert.Equal((640, 360), (Ffmpeg.ProbeStream(_tmp["p.mp4"]).Width, Ffmpeg.ProbeStream(_tmp["p.mp4"]).Height));
         _log.AssertNoFallback();
     }
 }
