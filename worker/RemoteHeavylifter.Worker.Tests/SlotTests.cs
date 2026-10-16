@@ -66,6 +66,8 @@ public sealed class SlotTests
         Assert.Equal("qsv", Options().IntelApi);
         Assert.Equal("vaapi", Options("--intel-api=VAAPI").IntelApi);
         Assert.Contains(Options("--intel-api=amf", "--cove-url=http://c").Validate(), e => e.Contains("HL_INTEL_API"));
+        Assert.Equal(OperatingSystem.IsWindows(),
+            Options("--intel-api=vaapi", "--cove-url=http://c").Validate().Any(e => e.Contains("Linux only")));
     }
 
     [Fact]
@@ -143,6 +145,15 @@ public sealed class SlotTests
         var gpus = GpuDetection.ForPlatform().Detect(NullLogger.Instance);
         Assert.NotEmpty(gpus);
         Assert.All(gpus, g => Assert.Contains(g.Decoders, d => d.Codec == "h264"));
+    }
+
+    [Fact]
+    public void D3d11_profiles_map_to_libav_decoders()
+    {
+        Assert.Equal(D3d11Probe.Profiles.Length, D3d11Probe.Profiles.Select(p => p.Profile).Distinct().Count());
+        Assert.Equal(["av1", "h264", "hevc", "mpeg2video", "mpeg4", "vc1", "vp8", "vp9", "wmv3"],
+            D3d11Probe.Profiles.SelectMany(p => p.Codecs).Distinct().Order(StringComparer.Ordinal));
+        Assert.Equal(D3d11Probe.Sizes.OrderByDescending(s => (long)s.Width * s.Height), D3d11Probe.Sizes);
     }
 
     [Fact]

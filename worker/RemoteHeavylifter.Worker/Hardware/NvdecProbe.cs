@@ -6,9 +6,48 @@ namespace RemoteHeavylifter.Worker.Hardware;
 
 /// <summary>What an NVIDIA GPU decodes, from NVDEC (cuvidGetDecoderCaps) in a CUDA context on it. Its CUDA ordinal,
 /// found by PCI address, is the device ffmpeg's cuda hwaccel and nvenc take.</summary>
-internal static partial class NvdecProbe
+internal static unsafe partial class NvdecProbe
 {
     private const int CudaSuccess = 0;
+    private const string Cuda = "libcuda.so.1";
+    private const string Nvcuvid = "libnvcuvid.so.1";
+
+    // The driver's libraries are nvcuda.dll and nvcuvid.dll on Windows.
+    static NvdecProbe()
+    {
+        if (OperatingSystem.IsWindows())
+            NativeLibrary.SetDllImportResolver(typeof(NvdecProbe).Assembly, (name, assembly, path) => name switch
+            {
+                Cuda => NativeLibrary.Load("nvcuda.dll", assembly, path),
+                Nvcuvid => NativeLibrary.Load("nvcuvid.dll", assembly, path),
+                _ => IntPtr.Zero,
+            });
+    }
+
+    /// <summary>The GPUs CUDA sees, by PCI address (0000:01:00.0) and name; empty without the NVIDIA driver.</summary>
+    public static List<(string Pci, string Name)> Devices(ILogger log)
+    {
+        var devices = new List<(string, string)>();
+        try
+        {
+            if (CuInit(0) != CudaSuccess || CuDeviceGetCount(out var count) != CudaSuccess)
+                return devices;
+            var buffer = stackalloc byte[256];
+            for (var ordinal = 0; ordinal < count; ordinal++)
+            {
+                if (CuDeviceGet(out var device, ordinal) != CudaSuccess || CuDeviceGetPciBusId(buffer, 256, device) != CudaSuccess)
+                    continue;
+                var pci = Marshal.PtrToStringUTF8((IntPtr)buffer)!.ToLowerInvariant();
+                var name = CuDeviceGetName(buffer, 256, device) == CudaSuccess ? Marshal.PtrToStringUTF8((IntPtr)buffer)! : $"NVIDIA GPU ({pci})";
+                devices.Add((pci, name));
+            }
+        }
+        catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException)
+        {
+            log.LogDebug("No NVIDIA driver ({Error})", ex.Message);
+        }
+        return devices;
+    }
 
     /// <summary>cudaVideoCodec values (cuviddec.h: MPEG1=0 … JPEG=5, H264_SVC=6, H264_MVC=7, HEVC=8 …) and the libav
     /// decoders they serve.</summary>
@@ -67,7 +106,7 @@ internal static partial class NvdecProbe
 
     /// <summary>CUVIDDECODECAPS (88 bytes).</summary>
     [StructLayout(LayoutKind.Sequential)]
-    private unsafe struct DecodeCaps
+    private struct DecodeCaps
     {
         public int CodecType;
         public int ChromaFormat;
@@ -89,18 +128,30 @@ internal static partial class NvdecProbe
         public fixed uint Reserved3[9];
     }
 
-    [LibraryImport("libcuda.so.1", EntryPoint = "cuInit")]
+    [LibraryImport(Cuda, EntryPoint = "cuInit")]
     private static partial int CuInit(uint flags);
 
-    [LibraryImport("libcuda.so.1", EntryPoint = "cuDeviceGetByPCIBusId", StringMarshalling = StringMarshalling.Utf8)]
+    [LibraryImport(Cuda, EntryPoint = "cuDeviceGetByPCIBusId", StringMarshalling = StringMarshalling.Utf8)]
     private static partial int CuDeviceGetByPciBusId(out int device, string pciBusId);
 
-    [LibraryImport("libcuda.so.1", EntryPoint = "cuCtxCreate_v2")]
+    [LibraryImport(Cuda, EntryPoint = "cuDeviceGetCount")]
+    private static partial int CuDeviceGetCount(out int count);
+
+    [LibraryImport(Cuda, EntryPoint = "cuDeviceGet")]
+    private static partial int CuDeviceGet(out int device, int ordinal);
+
+    [LibraryImport(Cuda, EntryPoint = "cuDeviceGetPCIBusId")]
+    private static partial int CuDeviceGetPciBusId(byte* pciBusId, int length, int device);
+
+    [LibraryImport(Cuda, EntryPoint = "cuDeviceGetName")]
+    private static partial int CuDeviceGetName(byte* name, int length, int device);
+
+    [LibraryImport(Cuda, EntryPoint = "cuCtxCreate_v2")]
     private static partial int CuCtxCreate(out IntPtr context, uint flags, int device);
 
-    [LibraryImport("libcuda.so.1", EntryPoint = "cuCtxDestroy_v2")]
+    [LibraryImport(Cuda, EntryPoint = "cuCtxDestroy_v2")]
     private static partial int CuCtxDestroy(IntPtr context);
 
-    [LibraryImport("libnvcuvid.so.1", EntryPoint = "cuvidGetDecoderCaps")]
+    [LibraryImport(Nvcuvid, EntryPoint = "cuvidGetDecoderCaps")]
     private static partial int CuvidGetDecoderCaps(ref DecodeCaps caps);
 }

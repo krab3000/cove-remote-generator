@@ -81,7 +81,7 @@ public sealed record WorkerOptions
         ("HL_HV_NVIDIA_SLOTS", "gpu_idx,slots for an NVIDIA GPU, as --hv-intel-slots."),
         ("HL_HV_APPLE_SLOTS", "0,slots for the Mac's media engine (VideoToolbox), as --hv-intel-slots."),
         ("HL_CPU_SLOTS", "Videos at once decoded and encoded in software. Default: 1."),
-        ("HL_INTEL_API", "qsv (Quick Sync) or vaapi: how Intel GPUs decode and encode. Default: qsv."),
+        ("HL_INTEL_API", "qsv (Quick Sync) or vaapi (Linux only): how Intel GPUs decode and encode. Default: qsv."),
         ("HL_HWACCEL_SKIP_CODECS", "Comma-separated codecs decoded in software on every GPU, e.g. vc1,mpeg2video."),
         ("HL_SOURCE_CACHE_MB", "RAM for source bytes read over HTTP, shared by all tasks; 0 turns it off. Default: 1024."),
         ("HL_FFMPEG_INPUT_ARGS", "Extra demuxer/protocol options for every source, as ffmpeg input options separated by spaces."),
@@ -231,6 +231,8 @@ public sealed record WorkerOptions
             errors.Add("HL_SPRITE_SEEK must be exact or keyframe.");
         if (IntelApi is not ("qsv" or "vaapi"))
             errors.Add("HL_INTEL_API must be qsv or vaapi.");
+        else if (IntelApi == "vaapi" && OperatingSystem.IsWindows())
+            errors.Add("HL_INTEL_API=vaapi is Linux only; on Windows, Intel GPUs use Quick Sync (qsv).");
         if (BenchClips.Any(c => c is not ("1080p" or "4k")))
             errors.Add("HL_BENCH_CLIPS must be 1080p and/or 4k.");
         if (Token is { Length: < Protocol.WorkerTokens.MinLength })

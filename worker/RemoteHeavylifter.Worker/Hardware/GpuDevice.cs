@@ -12,10 +12,12 @@ public static class GpuVendors
 
 /// <summary>A GPU the worker can decode and encode on.</summary>
 /// <param name="Vendor"><see cref="GpuVendors"/>.</param>
-/// <param name="Index">Its number among this vendor's GPUs, in PCI order: the gpu_idx of --hv-intel-slots / --hv-nvidia-slots.</param>
-/// <param name="HwAccel">The ffmpeg hwaccel decoding on it (vaapi, cuda).</param>
-/// <param name="DecodeDevice">The hwaccel's device: a render node for VA-API, a CUDA ordinal for CUDA; null: the default.</param>
-/// <param name="Encoder">The preview encoder on it (h264_vaapi, h264_nvenc).</param>
+/// <param name="Index">Its number among this vendor's GPUs, in PCI order (Intel GPUs on Windows: DXGI adapter order): the
+/// gpu_idx of --hv-intel-slots / --hv-nvidia-slots.</param>
+/// <param name="HwAccel">The ffmpeg hwaccel decoding on it (vaapi, d3d11va, cuda).</param>
+/// <param name="DecodeDevice">The hwaccel's device: a render node for VA-API, a DXGI adapter index for D3D11VA, a CUDA
+/// ordinal for CUDA; null: the default.</param>
+/// <param name="Encoder">The preview encoder on it (h264_vaapi, h264_qsv, h264_nvenc).</param>
 /// <param name="EncoderDevice">The encoder's device, as <paramref name="DecodeDevice"/>.</param>
 /// <param name="VideoEngines">Hardware video decode engines, when known (more engines decode more videos at once).</param>
 /// <param name="Decoders">Codecs (libav names) it decodes, with size limits.</param>
@@ -40,6 +42,7 @@ public static class GpuDetection
     public static IGpuDetector ForPlatform() =>
         OperatingSystem.IsLinux() ? new LinuxGpuDetector()
         : OperatingSystem.IsMacOS() ? new MacGpuDetector()
+        : OperatingSystem.IsWindows() ? new WindowsGpuDetector()
         : new UnsupportedGpuDetector();
 
     private sealed class UnsupportedGpuDetector : IGpuDetector
